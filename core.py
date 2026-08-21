@@ -1109,7 +1109,8 @@ def compose(primer_results, cfg):
             if call is not None and call["ok"]:
                 lab = "|".join(call["families"]) or "?"
                 c[lab] = c.get(lab, 0) + 1
-        return sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))
+        # 노트북 Counter.most_common() 과 동일 : 건수 내림차순, 동점은 삽입(클론) 순
+        return sorted(c.items(), key=lambda kv: -kv[1])
 
     chain_c = {}
     for g in good:
@@ -1128,7 +1129,7 @@ def compose(primer_results, cfg):
         "n_good": len(good),
         "vh": vh_t,
         "jh": tally("jh"),
-        "chain": sorted(chain_c.items(), key=lambda kv: (-kv[1], kv[0])),
+        "chain": sorted(chain_c.items(), key=lambda kv: -kv[1]),
         "vl": tally("vl"),
         "vj": tally("vj"),
         "cdr3_lens": sorted(lens),

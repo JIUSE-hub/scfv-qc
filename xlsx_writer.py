@@ -106,6 +106,9 @@ def _cell_xml(ref, style, value):
         if value != value or value in (float("inf"), float("-inf")):
             return '<c r="%s" s="%d" t="inlineStr"><is><t>%s</t></is></c>' % (
                 ref, style, _esc(value))
+        # 8.0 은 8 로 기록한다 (openpyxl 및 엑셀 자체 동작과 동일)
+        if value.is_integer() and abs(value) < 1e15:
+            return '<c r="%s" s="%d"><v>%d</v></c>' % (ref, style, int(value))
         return '<c r="%s" s="%d"><v>%r</v></c>' % (ref, style, value)
     s = str(value)
     space = ' xml:space="preserve"' if (s != s.strip()) else ""

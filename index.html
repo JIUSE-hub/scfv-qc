@@ -672,7 +672,9 @@ function renderResults(){
     h += "<tr>" + idx.map(i => {
       const name = H[i], v = row[i];
       const cls = NUMCOL.has(name) ? ' class="num"' : (MONOCOL.has(name) ? ' class="mono"' : "");
-      const inner = BADGECOL.has(name) ? badge(v) : esc(v == null ? "" : v);
+      const inner = BADGECOL.has(name) ? badge(v)
+        : (v == null || v === "" ? '<span style="color:var(--muted)">-</span>'
+                                  : esc(v));
       return "<td" + cls + ">" + inner + "</td>";
     }).join("") + "</tr>";
   });
