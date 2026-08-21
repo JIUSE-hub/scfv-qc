@@ -12,7 +12,7 @@
 | `index.html` | 화면과 파일 입출력. **판정 로직·서열·임계값 없음** |
 | `core.py` | 판정 로직 전부. 노트북 `scFv_sequencing_QC.ipynb` v1.0 에서 추출 |
 | `xlsx_writer.py` | `.xlsx` / `.csv` 생성. 표준 라이브러리만 사용 |
-| `scFv_primers.fa` | 기본 프라이머 목록 (89 종) |
+| `scFv_primers.fa` | 프라이머 목록. 보안상 저장소에 포함하지 않습니다. 사용 시 직접 업로드하세요 |
 
 외부 파이썬 패키지 의존성 **0 개**. `hashlib, io, json, re, struct, unicodedata, zipfile` 만 사용합니다.
 
