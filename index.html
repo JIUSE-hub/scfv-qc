@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pAIM1 scFv Sanger QC</title>
+<style>
+:root{
+  --snu:#003876; --snu-dark:#00265a; --snu-tint:#e9eff7; --snu-tint2:#f5f8fc;
+  --ink:#111827; --muted:#6b7280; --line:#e3e8ef; --bg:#fff;
+  --pass:#15803d; --fail:#b91c1c; --warn:#b45309; --check:#1d4ed8;
+  --mono: ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans: -apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{font-family:var(--sans);color:var(--ink);background:var(--snu-tint2);
+     font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--snu)}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em}
+
+/* ---------- 헤더 ---------- */
+header{background:var(--snu);color:#fff;padding:22px 0 20px}
+.wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+header h1{font-size:19px;letter-spacing:0}
+header .sub{font-size:12.5px;opacity:.72;margin-top:3px}
+header .ver{font-size:11.5px;opacity:.6;margin-top:8px;font-family:var(--mono)}
+
+/* ---------- 섹션 ---------- */
+main{padding:26px 0 60px}
+section{background:var(--bg);border:1px solid var(--line);border-radius:10px;
+        margin-bottom:18px;overflow:hidden}
+.sec-h{display:flex;align-items:baseline;gap:10px;padding:14px 20px;
+       border-bottom:1px solid var(--line);background:#fcfdfe}
+.sec-h .n{font-family:var(--mono);font-size:11px;color:#fff;background:var(--snu);
+          border-radius:4px;padding:2px 7px;letter-spacing:.04em}
+.sec-h h2{font-size:15px}
+.sec-h .hint{font-size:12.5px;color:var(--muted);margin-left:auto}
+.sec-b{padding:18px 20px}
+
+/* ---------- 파일 ---------- */
+.drops{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:760px){.drops{grid-template-columns:1fr}}
+.drop{border:1.5px dashed #c4d0e0;border-radius:9px;background:var(--snu-tint2);
+      padding:20px 16px;text-align:center;cursor:pointer;transition:.13s}
+.drop:hover,.drop.over{border-color:var(--snu);background:var(--snu-tint)}
+.drop .t{font-weight:600;font-size:13.5px;color:var(--snu-dark)}
+.drop .d{font-size:12px;color:var(--muted);margin-top:4px}
+.filelist{margin-top:14px;font-size:13px}
+.filerow{display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px}
+.filerow:nth-child(odd){background:var(--snu-tint2)}
+.filerow .nm{font-family:var(--mono);font-size:12.5px;flex:1;overflow:hidden;
+             text-overflow:ellipsis;white-space:nowrap}
+.filerow .sz{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
+.filerow button{border:0;background:none;color:var(--muted);cursor:pointer;
+                font-size:15px;line-height:1;padding:0 2px}
+.filerow button:hover{color:var(--fail)}
+
+/* ---------- 탭 ---------- */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 20px;background:#fcfdfe}
+.tab{border:0;background:none;padding:10px 14px;font:inherit;font-size:13px;
+     color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab.on{color:var(--snu);border-bottom-color:var(--snu);font-weight:600}
+.pane{display:none;padding:18px 20px}
+.pane.on{display:block}
+
+/* ---------- 폼 ---------- */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px 20px}
+.fld{display:flex;align-items:center;gap:10px}
+.fld label{flex:0 0 150px;font-size:13px;color:#374151}
+.fld .desc{font-size:11.5px;color:var(--muted);flex:1;min-width:0}
+input[type=number],select,input[type=text]{
+  font:inherit;font-size:13px;padding:5px 8px;border:1px solid #cfd8e3;border-radius:6px;
+  background:#fff;color:var(--ink);width:96px}
+select{width:auto;min-width:130px}
+input:focus,select:focus{outline:2px solid var(--snu-tint);border-color:var(--snu)}
+.chg{border-color:var(--warn)!important;background:#fffbeb!important}
+.seg{display:inline-flex;border:1px solid #cfd8e3;border-radius:6px;overflow:hidden}
+.seg button{border:0;background:#fff;font:inherit;font-size:12.5px;padding:5px 13px;cursor:pointer;color:var(--muted)}
+.seg button.on{background:var(--snu);color:#fff}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px}
+.grp{margin-bottom:20px}
+.grp>h3{font-size:12px;color:var(--snu);text-transform:none;letter-spacing:.02em;
+        margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.note{font-size:12.5px;color:var(--muted);margin:-4px 0 12px}
+
+/* ---------- 버튼 ---------- */
+.btn{font:inherit;font-size:13.5px;font-weight:600;padding:9px 20px;border-radius:7px;
+     border:1px solid var(--snu);background:var(--snu);color:#fff;cursor:pointer;transition:.13s}
+.btn:hover:not(:disabled){background:var(--snu-dark);border-color:var(--snu-dark)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.ghost{background:#fff;color:var(--snu)}
+.btn.ghost:hover:not(:disabled){background:var(--snu-tint)}
+.btn.sm{font-size:12.5px;padding:6px 13px;font-weight:500}
+.bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+
+/* ---------- 상태 ---------- */
+.status{font-size:12.5px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;background:#cbd5e1;flex:0 0 8px}
+.dot.busy{background:var(--warn);animation:p 1s infinite}
+.dot.ok{background:var(--pass)} .dot.err{background:var(--fail)}
+@keyframes p{50%{opacity:.3}}
+.err-box{background:#fef2f2;border:1px solid #fecaca;border-radius:7px;padding:12px 14px;
+         font-size:12.5px;color:#7f1d1d;margin-top:12px}
+.err-box pre{font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;margin:8px 0 0}
+
+/* ---------- 표 ---------- */
+.tblwrap{overflow:auto;max-height:66vh;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:separate;border-spacing:0;font-size:12.5px;width:100%}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}
+th{position:sticky;top:0;background:var(--snu);color:#fff;font-weight:600;z-index:2;
+   font-size:11.5px;letter-spacing:.01em}
+tbody tr:hover td{background:var(--snu-tint2)}
+td:first-child,th:first-child{position:sticky;left:0;z-index:1}
+th:first-child{z-index:3}
+td:first-child{background:#fff;font-family:var(--mono);font-weight:600}
+tbody tr:hover td:first-child{background:var(--snu-tint2)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td.mono{font-family:var(--mono);font-size:12px}
+.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11.5px;font-weight:600}
+.b-pass{background:#dcfce7;color:var(--pass)}
+.b-fail{background:#fee2e2;color:var(--fail)}
+.b-warn{background:#fef3c7;color:var(--warn)}
+.b-check{background:#dbeafe;color:var(--check)}
+.b-none{background:#f1f5f9;color:var(--muted)}
+
+/* ---------- 상세 ---------- */
+.detail{border:1px solid var(--line);border-radius:8px;margin-top:8px;overflow:hidden}
+.detail summary{padding:9px 14px;cursor:pointer;font-size:13px;background:#fcfdfe;
+                display:flex;align-items:center;gap:9px}
+.detail summary::-webkit-details-marker{display:none}
+.detail summary::before{content:"▸";color:var(--muted);font-size:11px}
+.detail[open] summary::before{content:"▾"}
+.detail .body{padding:10px 16px 14px;border-top:1px solid var(--line)}
+.detail ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:#374151}
+.detail li{margin:3px 0}
+.chip{display:inline-block;background:#fee2e2;color:var(--fail);border-radius:5px;
+      padding:1px 7px;font-size:11.5px;font-family:var(--mono);margin-right:5px}
+
+/* ---------- 조성 ---------- */
+.kv{display:grid;grid-template-columns:150px 1fr;gap:5px 14px;font-size:13px}
+.kv dt{color:var(--muted)} .kv dd{margin:0}
+
+/* ---------- 문서 ---------- */
+.doc details{border-top:1px solid var(--line)}
+.doc details:first-of-type{border-top:0}
+.doc summary{padding:11px 2px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--snu-dark);
+             display:flex;align-items:center;gap:8px}
+.doc summary::-webkit-details-marker{display:none}
+.doc summary::before{content:"▸";color:var(--muted);font-size:11px}
+.doc details[open] summary::before{content:"▾"}
+.doc summary .cnt{margin-left:auto;font-size:11.5px;color:var(--muted);font-weight:400}
+.doc .body{padding:2px 0 16px}
+.gitem{padding:9px 0;border-top:1px dotted var(--line);display:grid;
+       grid-template-columns:190px 1fr;gap:16px}
+.gitem:first-child{border-top:0}
+.gitem .t{font-weight:600;font-size:12.5px;color:#1f2937}
+.gitem .d{font-size:12.5px;color:#4b5563;word-break:break-word}
+.gitem .d code{font-family:var(--mono);font-size:11.5px;background:var(--snu-tint2);
+               padding:1px 4px;border-radius:3px;word-break:break-all}
+@media(max-width:700px){.gitem{grid-template-columns:1fr;gap:3px}}
+.constrow{display:grid;grid-template-columns:190px 1fr;gap:16px;padding:8px 0;
+          border-top:1px dotted var(--line);font-size:12.5px}
+.constrow:first-child{border-top:0}
+.constrow .k{font-family:var(--mono);font-weight:600;color:var(--snu-dark);font-size:12px}
+.constrow .v{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:#1f2937}
+.constrow .c{color:var(--muted);font-size:12px;margin-top:2px;font-family:var(--sans)}
+@media(max-width:700px){.constrow{grid-template-columns:1fr;gap:2px}}
+footer{text-align:center;font-size:11.5px;color:var(--muted);padding:0 0 30px}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>pAIM1 scFv Library &mdash; Sanger Read QC</h1>
+    <div class="sub">.ab1 판독 파일에서 scFv 카세트의 조립·클로닝 정합성을 검사하고, 유래 프라이머를 역추적합니다.</div>
+    <div class="ver" id="verline">초기화 중&hellip;</div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- 1. 입력 -->
+  <section>
+    <div class="sec-h"><span class="n">1</span><h2>입력</h2>
+      <span class="hint">.ab1 파일과 프라이머 FASTA 를 올려주세요</span></div>
+    <div class="sec-b">
+      <div class="drops">
+        <div class="drop" id="dropAb1">
+          <div class="t">Sanger 판독 파일 (.ab1)</div>
+          <div class="d">클릭하거나 끌어다 놓기 &middot; 여러 개 가능</div>
+          <input type="file" id="inAb1" multiple accept=".ab1" class="hidden">
+        </div>
+        <div class="drop" id="dropFa">
+          <div class="t">프라이머 FASTA</div>
+          <div class="d">클릭하거나 끌어다 놓기 &middot; 1 개</div>
+          <input type="file" id="inFa" accept=".fa,.fasta,.fas,.txt" class="hidden">
+        </div>
+      </div>
+      <div class="filelist" id="fileList"></div>
+      <div class="bar" style="margin-top:14px">
+        <button class="btn ghost sm" id="btnDefFa">기본 프라이머 목록 불러오기</button>
+        <button class="btn ghost sm" id="btnClear">전체 지우기</button>
+        <span class="status" id="scanMsg"></span>
+      </div>
+      <div id="scanWarn"></div>
+    </div>
+  </section>
+
+  <!-- 2. 설정 -->
+  <section id="secCfg">
+    <div class="sec-h"><span class="n">2</span><h2>설정</h2>
+      <span class="hint" id="hashLine"></span></div>
+    <div class="tabs">
+      <button class="tab on" data-p="pDesign">실험 설계</button>
+      <button class="tab" data-p="pThresh">판정 임계값</button>
+    </div>
+    <div class="pane on" id="pDesign"></div>
+    <div class="pane" id="pThresh"></div>
+    <div class="sec-b" style="border-top:1px solid var(--line)">
+      <div class="bar">
+        <button class="btn" id="btnRun" disabled>분석 실행</button>
+        <button class="btn ghost sm" id="btnReset">임계값 기본값 복원</button>
+        <span class="status" id="runMsg"><span class="dot" id="runDot"></span><span id="runTxt">준비 중</span></span>
+      </div>
+      <div id="errBox"></div>
+    </div>
+  </section>
+
+  <!-- 3. 결과 -->
+  <section id="secRes" class="hidden">
+    <div class="sec-h"><span class="n">3</span><h2>결과</h2>
+      <span class="hint" id="resHint"></span></div>
+    <div class="sec-b">
+      <div class="bar" style="margin-bottom:12px">
+        <div class="seg" id="colMode">
+          <button class="on" data-m="compact">요약 열</button>
+          <button data-m="full">전체 열</button>
+        </div>
+        <span style="flex:1"></span>
+        <button class="btn sm" id="dlXlsx">xlsx 내려받기</button>
+        <button class="btn ghost sm" id="dlCsv">csv</button>
+        <button class="btn ghost sm" id="dlFa">fasta</button>
+      </div>
+      <div class="tblwrap"><table id="resTbl"></table></div>
+      <div id="resDetail" style="margin-top:16px"></div>
+      <div id="resComp" style="margin-top:20px"></div>
+    </div>
+  </section>
+
+  <!-- 4. 설명 -->
+  <section class="doc">
+    <div class="sec-h"><span class="n">4</span><h2>설명</h2>
+      <span class="hint">모든 내용은 core.py 에서 읽어옵니다</span></div>
+    <div class="sec-b" id="docBody">
+      <div class="status"><span class="dot"></span>불러오는 중&hellip;</div>
+    </div>
+  </section>
+
+  <footer id="footer"></footer>
+</main>
+
+<script>
+"use strict";
+/* ===========================================================================
+   index.html — 화면과 파일 입출력만 담당합니다.
+   판정 로직·서열·임계값은 전부 core.py 에 있고, 이 파일에는 없습니다.
+   화면에 보이는 상수/용어/기본값도 실행 시 core.py 에서 읽어옵니다.
+   =========================================================================== */
+
+// 벤더링 시 이 한 줄만 로컬 경로로 바꾸면 됩니다.
+const PYODIDE_BASE = "https://cdn.jsdelivr.net/pyodide/v314.0.5/full/";
+const PYODIDE_VER  = "v314.0.5";
+const DEFAULT_FA   = "scFv_primers.fa";
+
+let py = null, DOC = null, SCAN = null, OUT = null, COLMODE = "compact";
+const ab1Files = new Map();      // name -> File
+let faFile = null, faText = "";
+
+const $  = (s) => document.querySelector(s);
+const $$ = (s) => Array.from(document.querySelectorAll(s));
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+
+function setRun(state, text){
+  const d = $("#runDot"); d.className = "dot" + (state ? " " + state : "");
+  $("#runTxt").textContent = text;
+}
+function showErr(title, detail){
+  $("#errBox").innerHTML = '<div class="err-box"><b>' + esc(title) + "</b>" +
+    (detail ? "<pre>" + esc(detail) + "</pre>" : "") + "</div>";
+}
+function clearErr(){ $("#errBox").innerHTML = ""; }
+
+/* ---------- Pyodide 부팅 ---------- */
+function loadScript(src){
+  return new Promise((ok, ng) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = ok; s.onerror = () => ng(new Error(src + " 로드 실패"));
+    document.head.appendChild(s);
+  });
+}
+
+const GLUE = `
+# --- I/O 접착부 : 판정 로직 없음 -------------------------------------------
+import json, os, sys
+sys.path.insert(0, "/app")
+import core, xlsx_writer
+
+def _inputs():
+    fs = []
+    if os.path.isdir("/input"):
+        for n in sorted(os.listdir("/input")):
+            if n.lower().endswith(".ab1"):
+                with open("/input/" + n, "rb") as fh:
+                    fs.append((n, fh.read()))
+    return fs
+
+def _primer_text():
+    p = "/input/_primers.fa"
+    if os.path.exists(p):
+        with open(p, encoding="utf-8", errors="ignore") as fh:
+            return fh.read()
+    return ""
+
+def js_docs():
+    return json.dumps({
+        "const": [{"key": k, "value": str(core.CONST[k]), "desc": d}
+                  for k, d in core.CONST_DOC],
+        "glossary": core.glossary(),
+        "thresh": [{"key": k, "label": core.CFG_DOC[k][0], "desc": core.CFG_DOC[k][1],
+                    "default": core.CFG_DEFAULT_MAP[k],
+                    "isFloat": isinstance(core.CFG_DEFAULT_MAP[k], float)}
+                   for k in core.THRESH_KEYS],
+        "design": [{"key": k, "label": lab, "desc": memo,
+                    "default": core.DESIGN_DEFAULT_MAP[k]}
+                   for k, lab, memo in core.DESIGN_DOC],
+        "poolOpts": core.POOL_OPTS, "cdnaOpts": core.CDNA_OPTS, "nosel": core.NOSEL,
+        "version": {"core": core.CORE_VERSION, "notebook": core.NB_VERSION,
+                    "writer": xlsx_writer.WRITER_VERSION, "python": sys.version.split()[0]},
+    }, ensure_ascii=False)
+
+def js_scan():
+    return json.dumps(core.scan_inputs(_inputs(), _primer_text()),
+                      ensure_ascii=False, default=str)
+
+def js_analyze(cfg_json, meta_json):
+    out = core.analyze(_inputs(), _primer_text(),
+                       json.loads(cfg_json), json.loads(meta_json))
+    if out.get("ok"):
+        os.makedirs("/output", exist_ok=True)
+        with open("/output/book.xlsx", "wb") as fh:
+            fh.write(xlsx_writer.write_xlsx(out["sheets"]))
+        with open("/output/summary.csv", "wb") as fh:
+            fh.write(xlsx_writer.build_csv(out["summary"]["headers"],
+                                           out["summary"]["rows"]))
+        with open("/output/inserts.fa", "wb") as fh:
+            fh.write(out["fasta"].encode("utf-8"))
+        out = dict(out)
+        out.pop("sheets", None)
+    return json.dumps(out, ensure_ascii=False, default=str)
+`;
+
+async function boot(){
+  try{
+    setRun("busy", "Pyodide 내려받는 중 (최초 1회, 10~20 MB)");
+    await loadScript(PYODIDE_BASE + "pyodide.js");
+    py = await loadPyodide({ indexURL: PYODIDE_BASE });
+
+    setRun("busy", "core.py / xlsx_writer.py 불러오는 중");
+    py.FS.mkdirTree("/app");
+    for (const f of ["core.py", "xlsx_writer.py"]){
+      const r = await fetch(f + "?v=" + Date.now());
+      if (!r.ok) throw new Error(f + " 를 찾을 수 없습니다 (HTTP " + r.status + ")");
+      py.FS.writeFile("/app/" + f, new TextEncoder().encode(await r.text()));
+    }
+    py.runPython(GLUE);
+    DOC = JSON.parse(py.runPython("js_docs()"));
+
+    buildThresholdForm(); buildDesignForm(); buildDocs();
+    $("#verline").textContent =
+      "core " + DOC.version.core + "  ·  xlsx_writer " + DOC.version.writer +
+      "  ·  기준 노트북 v" + DOC.version.notebook +
+      "  ·  Pyodide " + PYODIDE_VER + " (Python " + DOC.version.python + ")";
+    $("#footer").innerHTML =
+      "판정 로직 <code>core.py</code> · 파일 생성 <code>xlsx_writer.py</code> · " +
+      "외부 파이썬 패키지 0 개 · 업로드한 파일은 브라우저 밖으로 나가지 않습니다";
+    setRun("ok", "준비 완료");
+    refreshRunnable();
+  }catch(e){
+    setRun("err", "초기화 실패");
+    showErr("초기화에 실패했습니다.", String(e && e.message || e) +
+      "\n\ncore.py 와 xlsx_writer.py 가 index.html 과 같은 폴더에 있어야 하며, " +
+      "정적 호스팅(예: GitHub Pages)에서 열어야 합니다. " +
+      "브라우저가 WebAssembly 를 차단하고 있지 않은지도 확인해 주세요.");
+  }
+}
+
+/* ---------- 폼 생성 (전부 core.py 에서 읽은 값) ---------- */
+function buildThresholdForm(){
+  const g = document.createElement("div"); g.className = "grid";
+  DOC.thresh.forEach(t => {
+    const d = document.createElement("div"); d.className = "fld";
+    d.innerHTML =
+      '<label for="th_' + t.key + '">' + esc(t.label) + "</label>" +
+      '<input type="number" id="th_' + t.key + '" data-key="' + t.key + '" ' +
+      'data-def="' + t.default + '" step="' + (t.isFloat ? "0.01" : "1") + '" ' +
+      'value="' + t.default + '">' +
+      '<span class="desc">' + esc(t.desc) + "</span>";
+    g.appendChild(d);
+  });
+  const p = $("#pThresh");
+  p.innerHTML = '<div class="note">기본값은 실측 데이터로 정했습니다. ' +
+    '바꾸면 아래 param_hash 가 달라지고 결과 파일에 함께 기록됩니다.</div>';
+  p.appendChild(g);
+  p.querySelectorAll("input").forEach(i => i.addEventListener("input", onCfgChange));
+}
+
+function segHTML(key, opts, cur){
+  return '<span class="seg" data-key="' + key + '">' + opts.map(o =>
+    '<button type="button" data-v="' + esc(o) + '"' +
+    (o === cur ? ' class="on"' : "") + ">" + esc(o) + "</button>").join("") + "</span>";
+}
+
+function buildDesignForm(){
+  const byKey = {}; DOC.design.forEach(d => byKey[d.key] = d);
+  const fld = (k, inner) =>
+    '<div class="fld"><label>' + esc(byKey[k].label) + "</label>" + inner +
+    '<span class="desc">' + esc(byKey[k].desc) + "</span></div>";
+
+  let h = '<div class="grp"><h3>Fragment PCR 구성</h3><div class="grid">';
+  ["f1_for_mode","f1_rev_mode","f2_for_mode","f2_rev_mode","f3_for_mode","f3_rev_mode"]
+    .forEach(k => h += fld(k, segHTML(k, DOC.poolOpts, byKey[k].default)));
+  h += "</div>" +
+    '<div class="chk" style="margin-top:12px"><input type="checkbox" id="dz_f3_product_pooled"' +
+    (byKey["f3_product_pooled"].default ? " checked" : "") +
+    '><label for="dz_f3_product_pooled">' + esc(byKey["f3_product_pooled"].label) +
+    " &mdash; " + esc(byKey["f3_product_pooled"].desc) + "</label></div></div>";
+
+  h += '<div class="grp"><h3>이번 배치</h3>' +
+    '<div class="note">파일명에서 자동 추정합니다. 다르면 바꾸세요. ' +
+    '&ldquo;' + esc(DOC.nosel) + '&rdquo; 이면 교차오염 검사를 건너뜁니다.</div><div class="grid">' +
+    fld("batch_vh_family", '<select id="dz_batch_vh_family"></select>') +
+    fld("batch_chain", '<select id="dz_batch_chain"></select>') + "</div></div>";
+
+  h += '<div class="grp"><h3>cDNA 합성 / RNA 출처</h3>' +
+    '<div class="note">판정에는 쓰이지 않고 결과 파일에 기록만 됩니다.</div><div class="grid">';
+  ["cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k =>
+    h += fld(k, '<select id="dz_' + k + '">' + DOC.cdnaOpts.map(o =>
+      '<option' + (o === byKey[k].default ? " selected" : "") + ">" + esc(o) +
+      "</option>").join("") + "</select>"));
+  h += "</div>" +
+    '<div class="chk" style="margin-top:12px"><input type="checkbox" id="dz_rna_bone_marrow" checked>' +
+    '<label for="dz_rna_bone_marrow">RNA 출처 &middot; Bone marrow</label></div>' +
+    '<div class="chk" style="margin-top:6px"><input type="checkbox" id="dz_rna_peripheral" checked>' +
+    '<label for="dz_rna_peripheral">RNA 출처 &middot; Peripheral leukocytes</label></div></div>';
+
+  const p = $("#pDesign"); p.innerHTML = h;
+  p.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
+    b.parentElement.querySelectorAll("button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on"); onCfgChange();
+  }));
+  p.querySelectorAll("select,input").forEach(i => i.addEventListener("change", onCfgChange));
+  fillBatchOptions([DOC.nosel], [DOC.nosel], {});
+}
+
+function fillBatchOptions(vhOpts, chOpts, guess){
+  const set = (id, opts, val) => {
+    const s = $("#" + id); if (!s) return;
+    s.innerHTML = opts.map(o => "<option" + (o === val ? " selected" : "") + ">" +
+      esc(o) + "</option>").join("");
+  };
+  set("dz_batch_vh_family", vhOpts, guess.vh || DOC.nosel);
+  set("dz_batch_chain", chOpts, guess.chain || DOC.nosel);
+}
+
+function readConfig(){
+  const cfg = {};
+  DOC.thresh.forEach(t => {
+    const el = $("#th_" + t.key);
+    const v = parseFloat(el.value);
+    cfg[t.key] = isNaN(v) ? t.default : v;
+  });
+  $$("#pDesign .seg").forEach(s => {
+    const on = s.querySelector("button.on");
+    cfg[s.dataset.key] = on ? on.dataset.v : null;
+  });
+  ["f3_product_pooled","rna_bone_marrow","rna_peripheral"].forEach(k =>
+    cfg[k] = $("#dz_" + k).checked);
+  ["batch_vh_family","batch_chain","cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k =>
+    cfg[k] = $("#dz_" + k).value);
+  return cfg;
+}
+
+function onCfgChange(){
+  let n = 0;
+  DOC.thresh.forEach(t => {
+    const el = $("#th_" + t.key);
+    const changed = String(parseFloat(el.value)) !== String(t.default);
+    el.classList.toggle("chg", changed); if (changed) n++;
+  });
+  $("#hashLine").innerHTML = n
+    ? '<span style="color:var(--warn)">기본값에서 벗어난 임계값 ' + n + " 건</span>"
+    : "판정 임계값 전부 기본값";
+}
+
+$("#btnReset").addEventListener("click", () => {
+  DOC.thresh.forEach(t => $("#th_" + t.key).value = t.default);
+  onCfgChange();
+});
+$$(".tab").forEach(t => t.addEventListener("click", () => {
+  $$(".tab").forEach(x => x.classList.remove("on")); t.classList.add("on");
+  $$(".pane").forEach(p => p.classList.remove("on")); $("#" + t.dataset.p).classList.add("on");
+}));
+
+/* ---------- 파일 ---------- */
+function bindDrop(zoneId, inputId, handler){
+  const z = $("#" + zoneId), i = $("#" + inputId);
+  z.addEventListener("click", () => i.click());
+  i.addEventListener("change", () => { handler(Array.from(i.files)); i.value = ""; });
+  ["dragenter","dragover"].forEach(e => z.addEventListener(e, ev => {
+    ev.preventDefault(); z.classList.add("over"); }));
+  ["dragleave","drop"].forEach(e => z.addEventListener(e, ev => {
+    ev.preventDefault(); z.classList.remove("over"); }));
+  z.addEventListener("drop", ev => handler(Array.from(ev.dataTransfer.files)));
+}
+bindDrop("dropAb1", "inAb1", fs => {
+  fs.filter(f => f.name.toLowerCase().endsWith(".ab1")).forEach(f => ab1Files.set(f.name, f));
+  const bad = fs.filter(f => !f.name.toLowerCase().endsWith(".ab1"));
+  if (bad.length) showErr(".ab1 이 아닌 파일은 제외했습니다: " +
+    bad.map(f => f.name).join(", "),
+    "품질값(Q)과 크로마토그램이 없는 .seq 텍스트로는 판정의 절반을 수행할 수 없습니다.");
+  else clearErr();
+  syncAndScan();
+});
+bindDrop("dropFa", "inFa", fs => { if (fs[0]){ faFile = fs[0]; faText = ""; syncAndScan(); } });
+
+$("#btnClear").addEventListener("click", () => {
+  ab1Files.clear(); faFile = null; faText = "";
+  $("#secRes").classList.add("hidden"); clearErr(); syncAndScan();
+});
+$("#btnDefFa").addEventListener("click", async () => {
+  try{
+    const r = await fetch(DEFAULT_FA + "?v=" + Date.now());
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    faText = await r.text(); faFile = { name: DEFAULT_FA, size: faText.length };
+    clearErr(); syncAndScan();
+  }catch(e){
+    showErr("기본 프라이머 목록을 불러오지 못했습니다.",
+      DEFAULT_FA + " 를 index.html 과 같은 폴더에 두거나, 직접 업로드해 주세요. (" + e.message + ")");
+  }
+});
+
+function renderFiles(){
+  const rows = [];
+  Array.from(ab1Files.values()).sort((a,b) => a.name.localeCompare(b.name)).forEach(f =>
+    rows.push('<div class="filerow"><span class="nm">' + esc(f.name) + "</span>" +
+      '<span class="sz">' + (f.size/1024).toFixed(0) + " KB</span>" +
+      '<button data-rm="' + esc(f.name) + '" title="제거">&times;</button></div>'));
+  if (faFile)
+    rows.push('<div class="filerow"><span class="nm">' + esc(faFile.name) +
+      "</span><span class=\"sz\">프라이머</span>" +
+      '<button data-rmfa="1" title="제거">&times;</button></div>');
+  $("#fileList").innerHTML = rows.join("");
+  $$("#fileList [data-rm]").forEach(b => b.addEventListener("click", () => {
+    ab1Files.delete(b.dataset.rm); syncAndScan(); }));
+  $$("#fileList [data-rmfa]").forEach(b => b.addEventListener("click", () => {
+    faFile = null; faText = ""; syncAndScan(); }));
+}
+
+async function syncAndScan(){
+  renderFiles(); refreshRunnable();
+  if (!py) return;
+  try{ py.FS.mkdirTree("/input"); }catch(e){}
+  for (const n of py.FS.readdir("/input")){
+    if (n !== "." && n !== "..") { try{ py.FS.unlink("/input/" + n); }catch(e){} }
+  }
+  for (const f of ab1Files.values())
+    py.FS.writeFile("/input/" + f.name, new Uint8Array(await f.arrayBuffer()));
+  if (faFile)
+    py.FS.writeFile("/input/_primers.fa", new TextEncoder().encode(
+      faText || await faFile.text()));
+
+  if (!ab1Files.size && !faFile){ $("#scanMsg").textContent = ""; $("#scanWarn").innerHTML = ""; return; }
+  try{
+    SCAN = JSON.parse(py.runPython("js_scan()"));
+    const g = SCAN.primer_groups.length;
+    $("#scanMsg").textContent =
+      "read " + SCAN.reads.length + " 개 · 프라이머 " + SCAN.primer_n + " 종" +
+      (g ? " (" + g + " 그룹)" : "") +
+      (SCAN.batches.length ? " · 배치 " + SCAN.batches.join(", ") : "");
+    fillBatchOptions(SCAN.options.vh_family, SCAN.options.chain, SCAN.guess);
+    const w = [];
+    SCAN.read_errors.forEach(e => w.push("읽기 실패 &middot; " + esc(e)));
+    SCAN.primer_unknown.forEach(n => w.push("그룹 미판정 프라이머 &middot; " + esc(n)));
+    SCAN.reads.filter(r => !r.parsed).forEach(r =>
+      w.push("파일명이 규격과 다릅니다 &middot; " + esc(r.filename) +
+             " (YYMMDD_배치명_c클론번호_프라이머명.ab1)"));
+    SCAN.reads.filter(r => !r.has_trace).forEach(r =>
+      w.push("트레이스 없음 &middot; " + esc(r.filename) + " (혼합 콜로니 판정 제한)"));
+    const seen = {}, dupIds = [];
+    SCAN.reads.forEach(r => { if (seen[r.id]) dupIds.push(r.id); seen[r.id] = 1; });
+    Array.from(new Set(dupIds)).forEach(i =>
+      w.push("클론 ID 중복 &middot; " + esc(i) +
+             " — 결과가 잘못 짝지어질 수 있으니 파일명을 구분해 주세요"));
+    $("#scanWarn").innerHTML = w.length
+      ? '<div class="err-box" style="background:#fffbeb;border-color:#fde68a;color:#78350f">' +
+        w.map(x => "<div>" + x + "</div>").join("") + "</div>" : "";
+  }catch(e){ showErr("입력을 읽는 중 오류가 발생했습니다.", String(e)); }
+  refreshRunnable();
+}
+
+function refreshRunnable(){
+  $("#btnRun").disabled = !(py && ab1Files.size > 0);
+}
+
+/* ---------- 실행 ---------- */
+$("#btnRun").addEventListener("click", async () => {
+  clearErr(); setRun("busy", "분석 중");
+  $("#btnRun").disabled = true;
+  await new Promise(r => setTimeout(r, 20));
+  try{
+    py.globals.set("_cfg_json", JSON.stringify(readConfig()));
+    py.globals.set("_meta_json", JSON.stringify({
+      runtime: "브라우저 / Pyodide " + PYODIDE_VER,
+      timestamp: new Date().toISOString().slice(0,19).replace("T"," "),
+      primer_file: faFile ? faFile.name : ""
+    }));
+    OUT = JSON.parse(py.runPython("js_analyze(_cfg_json, _meta_json)"));
+    if (!OUT.ok){
+      setRun("err", "중단"); showErr("분석을 진행할 수 없습니다.", OUT.errors.join("\n"));
+    }else{
+      renderResults(); setRun("ok", "완료");
+      $("#secRes").scrollIntoView({behavior:"smooth", block:"start"});
+    }
+  }catch(e){
+    setRun("err", "오류"); showErr("분석 중 오류가 발생했습니다.", String(e && e.message || e));
+  }
+  $("#btnRun").disabled = false;
+});
+
+/* ---------- 결과 ---------- */
+const COMPACT = ["clone","최종판정","인서트(bp)","프레임(%3)","d1(bp)","d2(bp)",
+  "QC1","QC2","QC3","QC4","혼합(%)","VH family","JH","경쇄","VL-V family","VL-J",
+  "CDR3-H3","CDR3-H3(aa)"];
+const NUMCOL = new Set(["사용길이(bp)","인서트(bp)","프레임(%3)","d1(bp)","d2(bp)",
+  "혼합(%)","CDR3-H3(aa)"]);
+const MONOCOL = new Set(["clone","CDR3-H3","param_hash","VH family","JH",
+  "VL-V family","VL-J"]);
+
+function badge(v){
+  const s = String(v);
+  if (s === "PASS") return '<span class="badge b-pass">PASS</span>';
+  if (s === "PASS*") return '<span class="badge b-pass">PASS*</span>';
+  if (s === "WARN") return '<span class="badge b-warn">WARN</span>';
+  if (s === "OK") return '<span class="badge b-pass">OK</span>';
+  if (s === "NA" || s === "-" || s === "") return '<span class="badge b-none">' + (s||"-") + "</span>";
+  if (s === "LONG_INSERT?" || s === "LOW_COVERAGE") return '<span class="badge b-check">' + esc(s) + "</span>";
+  return '<span class="badge b-fail">' + esc(s) + "</span>";
+}
+const BADGECOL = new Set(["최종판정","구조QC","QC1","QC2","QC3","QC4","내부종결"]);
+
+function renderResults(){
+  const H = OUT.summary.headers, R = OUT.summary.rows;
+  const idx = (COLMODE === "compact")
+    ? COMPACT.map(n => H.indexOf(n)).filter(i => i >= 0)
+    : H.map((_, i) => i);
+  let h = "<thead><tr>" + idx.map(i => "<th>" + esc(H[i]) + "</th>").join("") + "</tr></thead><tbody>";
+  R.forEach(row => {
+    h += "<tr>" + idx.map(i => {
+      const name = H[i], v = row[i];
+      const cls = NUMCOL.has(name) ? ' class="num"' : (MONOCOL.has(name) ? ' class="mono"' : "");
+      const inner = BADGECOL.has(name) ? badge(v) : esc(v == null ? "" : v);
+      return "<td" + cls + ">" + inner + "</td>";
+    }).join("") + "</tr>";
+  });
+  $("#resTbl").innerHTML = h + "</tbody>";
+
+  const nPass = R.filter(r => String(r[H.indexOf("최종판정")]).startsWith("PASS")).length;
+  $("#resHint").innerHTML = "통과 <b>" + nPass + "</b> / " + R.length +
+    " &nbsp;·&nbsp; param_hash <code>" + esc(OUT.config.param_hash) + "</code>" +
+    (OUT.config.nondefault.length
+      ? ' &nbsp;·&nbsp; <span style="color:var(--warn)">비표준 임계값 ' +
+        OUT.config.nondefault.length + " 건</span>" : "");
+
+  // 상세
+  const callById = {}; OUT.calls.forEach(c => callById[c.id] = c);
+  const det = OUT.qc.filter(q => q.notes.length ||
+    (((callById[q.id] || {}).notes) || []).length);
+  $("#resDetail").innerHTML = det.length ? det.map(q => {
+    const c = callById[q.id] || {flags:[], notes:[]};
+    const flags = q.flags.concat(c.flags);
+    return '<details class="detail"><summary><b>' + esc(q.id) + "</b>" +
+      flags.map(f => '<span class="chip">' + esc(f) + "</span>").join("") +
+      "</summary><div class=\"body\"><ul>" +
+      q.notes.concat(c.notes).map(n => "<li>" + esc(n) + "</li>").join("") +
+      "</ul></div></details>";
+  }).join("") : '<div class="status">추가로 확인할 항목이 없습니다.</div>';
+
+  // 조성
+  const C = OUT.composition;
+  const line = (a) => a.length ? a.map(kv => esc(kv[0]) + " " + kv[1]).join(" / ") +
+    "  (" + a.length + " 종)" : "&mdash;";
+  let comp = "<h3 style=\"font-size:13px;color:var(--snu);margin-bottom:10px\">배치 조성" +
+    " <span style=\"font-weight:400;color:var(--muted)\">— 구조QC와 프라이머 판별을 모두 통과한 " +
+    C.n_good + " / " + C.n_total + " 클론</span></h3><dl class=\"kv\">";
+  if (C.batch_vh_match !== null) comp += "<dt>지정 VH family</dt><dd>" +
+    C.batch_vh_match + " / " + C.n_good + " 일치</dd>";
+  if (C.batch_chain_match !== null) comp += "<dt>지정 경쇄</dt><dd>" +
+    C.batch_chain_match + " / " + C.n_good + " 일치</dd>";
+  comp += "<dt>VH family</dt><dd>" + line(C.vh) + "</dd>" +
+    "<dt>JH</dt><dd>" + line(C.jh) + "</dd>" +
+    "<dt>경쇄</dt><dd>" + line(C.chain) + "</dd>" +
+    "<dt>VL V-gene</dt><dd>" + line(C.vl) + "</dd>" +
+    "<dt>VL J-gene</dt><dd>" + line(C.vj) + "</dd>" +
+    "<dt>CDR3-H3 길이</dt><dd>" + (C.cdr3_lens.length
+      ? C.cdr3_lens.join(", ") + " aa  (중앙값 " + C.cdr3_median + ")" : "&mdash;") + "</dd>" +
+    "<dt>중복 CDR3-H3</dt><dd>" + C.cdr3_dup.length + " 건" +
+      (C.cdr3_dup.length ? " &middot; " + esc(C.cdr3_dup.join(", ")) : "") + "</dd>";
+  if (C.overlong_suspect.length) comp += '<dt style="color:var(--warn)">점검</dt><dd>' +
+    "F1_For 불일치가 판별구간 앞 " + C.overlong_zone + " nt 안에만 몰린 클론 &middot; " +
+    esc(C.overlong_suspect.join(", ")) + "</dd>";
+  $("#resComp").innerHTML = comp + "</dl>";
+  $("#secRes").classList.remove("hidden");
+}
+
+$$("#colMode button").forEach(b => b.addEventListener("click", () => {
+  $$("#colMode button").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); COLMODE = b.dataset.m; if (OUT) renderResults();
+}));
+
+/* ---------- 내려받기 ---------- */
+function filePrefix(){
+  const d = (OUT.reads.find(r => r.date) || {}).date || "";
+  const b = (OUT.config.batches[0] || "batch");
+  return ((d ? d + "_" : "") + b).replace(/[^\p{L}\p{N}\-_]/gu, "_");
+}
+function download(name, bytes, mime){
+  const blob = new Blob([bytes], {type: mime});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; document.body.appendChild(a); a.click();
+  a.remove(); setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+function grab(path){ return py.FS.readFile(path); }
+$("#dlXlsx").addEventListener("click", () => download(filePrefix() + "_scFvQC.xlsx",
+  grab("/output/book.xlsx"),
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"));
+$("#dlCsv").addEventListener("click", () => download(filePrefix() + "_scFvQC_summary.csv",
+  grab("/output/summary.csv"), "text/csv"));
+$("#dlFa").addEventListener("click", () => download(filePrefix() + "_scFvQC_inserts.fa",
+  grab("/output/inserts.fa"), "text/plain"));
+
+/* ---------- 설명 ---------- */
+function buildDocs(){
+  const groups = new Map();
+  DOC.glossary.forEach(([cat, term, desc]) => {
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push([term, desc]);
+  });
+  let h = "<details open><summary>코드에 고정된 값" +
+    '<span class="cnt">' + DOC.const.length + " 항목 · UI 에서 바꿀 수 없습니다</span></summary>" +
+    '<div class="body"><div class="note">서열과 프레임 규칙만 고정되어 있습니다. ' +
+    "판정에 쓰이는 수치는 전부 위 &lsquo;설정&rsquo; 의 판정 임계값에 있습니다.</div>";
+  DOC.const.forEach(c => h += '<div class="constrow"><div class="k">' + esc(c.key) +
+    '</div><div><div class="v">' + esc(c.value) + '</div><div class="c">' +
+    esc(c.desc) + "</div></div></div>");
+  h += "</div></details>";
+  groups.forEach((items, cat) => {
+    h += "<details><summary>" + esc(cat) +
+      '<span class="cnt">' + items.length + " 항목</span></summary><div class=\"body\">" +
+      items.map(([t, d]) => '<div class="gitem"><div class="t">' + esc(t) +
+        '</div><div class="d">' + markSeq(d) + "</div></div>").join("") +
+      "</div></details>";
+  });
+  $("#docBody").innerHTML = h;
+}
+function markSeq(s){
+  return esc(s).replace(/\b[ACGT]{8,}\b/g, m => "<code>" + m + "</code>");
+}
+
+boot();
+</script>
+</body>
+</html>
