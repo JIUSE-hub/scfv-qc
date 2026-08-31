@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "1.3"
+CORE_VERSION = "2.0"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -71,7 +71,8 @@ CONST_DOC = [
     ("QC3", "AscI + His6"),
     ("QC4", "3xFLAG + amber TAG"),
     ("STUFFER", "모클론 스터퍼 VH 검출용"),
-    ("STUFFER_INSERT_BP", "스터퍼 보유 시 인서트 길이 (bp)"),
+    ("STUFFER_INSERT_BP",
+     "스터퍼 보유 시 인서트 길이 (bp). 서열 미검출 시 이 길이로 PARENTAL? 판정"),
     ("TAG_F1_For", "프라이머 자동분류용 5' 태그"),
     ("TAG_F2_Rev", "프라이머 자동분류용 5' 태그"),
     ("TAG_F3_For", "프라이머 자동분류용 5' 태그"),
@@ -98,7 +99,7 @@ RULES = {
         "TOO_SHORT": 3, "TOO_LONG": 3, "FRAMESHIFT": 3, "INTERNAL_STOP": 3,
         "LINKER_DEL": 3, "QC_DEL": 3, "QC_ABSENT": 3,
         "ABERRANT_D1": 3, "ABERRANT_D2": 3, "TANDEM_REPEAT": 3, "MIXED": 3,
-        "LONG_INSERT?": 2, "LOW_COVERAGE": 2,
+        "LONG_INSERT?": 2, "LOW_COVERAGE": 2, "PARENTAL?": 2,
         "QC_WARN": 1,
     },
 }
@@ -848,6 +849,16 @@ def qc_one(read, cfg):
             flags.append("FRAMESHIFT")
             notes.append("인서트 %d bp, %%3 = %d (유지 조건 %d)"
                          % (insert, insert % 3, CONST["FRAME_MOD"]))
+        # 스터퍼 서열은 read 앞쪽이라 품질 저하로 트리밍되면 놓칠 수 있습니다.
+        # 인서트 길이는 NotI / AscI 만 잡히면 계산되므로 더 넓게 덮습니다.
+        # 다만 서열 근거가 없으므로 확정(PARENTAL)이 아니라 확인 필요 등급으로 둡니다.
+        # 스터퍼는 벡터에 고정된 서열이라 길이가 정확하므로 허용 오차를 두지 않습니다.
+        if not r["stuffer"] and insert == CONST["STUFFER_INSERT_BP"]:
+            flags.append("PARENTAL?")
+            notes.append("인서트 길이가 스터퍼 보유 클론과 같음 (%d bp). 스터퍼 서열은 "
+                         "검출되지 않았으므로 확정이 아님 - read 앞쪽 품질 저하로 놓쳤을 "
+                         "수 있고, 우연히 같은 길이인 다른 산물일 수도 있음. "
+                         "크로마토그램 확인 권장" % CONST["STUFFER_INSERT_BP"])
     if pos_n >= 0 and pos_l >= 0 and pos_l > pos_n:
         d1 = pos_l - pos_n
         if not (cfg["d1_min"] <= d1 <= cfg["d1_max"]):
@@ -1349,7 +1360,14 @@ def glossary():
         ["판정 코드", "NO_LINKER", "링커 미검출. fragment 2 또는 3 이 빠진 조립 산물."],
         ["판정 코드", "FRAMESHIFT", "인서트 길이 %3 이 2 가 아님. 뒤쪽 태그와 pIII 가 전부 무의미해집니다."],
         ["판정 코드", "INTERNAL_STOP", "amber TAG 이전에 종결코돈."],
-        ["판정 코드", "PARENTAL", "모클론 스터퍼 서열 검출. 미절단 또는 단일절단 벡터가 재결합한 배경 클론."],
+        ["판정 코드", "PARENTAL",
+         "모클론 스터퍼 서열 검출. 미절단 또는 단일절단 벡터가 재결합한 배경 클론. "
+         "길이만 일치하고 서열이 없으면 PARENTAL? 로 따로 표시한다."],
+        ["판정 코드", "PARENTAL?",
+         "인서트 길이가 스터퍼 보유 클론과 정확히 같지만(%d bp) 스터퍼 서열은 "
+         "검출되지 않은 경우. 확정이 아니라 확인 필요 등급이다. read 앞쪽 품질이 "
+         "나빠 스터퍼 구간이 트리밍됐을 수도 있고, 우연히 같은 길이인 다른 산물일 "
+         "수도 있다. 크로마토그램으로 확인한다." % CONST["STUFFER_INSERT_BP"]],
         ["판정 코드", "CONCATEMER", "NotI / AscI / 링커가 2 회 이상 검출. 인서트가 여러 개 들어감."],
         ["판정 코드", "TOO_SHORT / TOO_LONG", "인서트 길이가 설정 범위 밖."],
         ["판정 코드", "ABERRANT_D1 / ABERRANT_D2", "VH 또는 VL 구간 길이가 설정 범위 밖."],

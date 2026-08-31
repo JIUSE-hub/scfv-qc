@@ -61,7 +61,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.6"
+VERIFY_VERSION = "1.7"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -738,6 +738,58 @@ def sheets_for_check(core, reg_out):
     return core.build_sheets([], [], cfg, core.compose([], cfg), {})
 
 
+def _str_options(node):
+    """상수 문자열, 또는 삼항식의 양쪽 상수 문자열."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        return _str_options(node.body) | _str_options(node.orelse)
+    return set()
+
+
+def flags_appended_in(fn):
+    """함수 안에서 flags 리스트에 실제로 들어가는 문자열 집합."""
+    alias = {}
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            vals = _str_options(node.value)
+            if vals:
+                alias.setdefault(node.targets[0].id, set()).update(vals)
+    out = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "flags" and node.args):
+            vals = _str_options(node.args[0])
+            if not vals and isinstance(node.args[0], ast.Name):
+                vals = alias.get(node.args[0].id, set())
+            out |= vals
+    return out
+
+
+def check_flag_sev_keys(report, core, core_tree):
+    """FLAG_SEV 의 키와 qc_one 이 실제로 붙이는 플래그가 양방향으로 맞는가.
+
+    FLAG_SEV 에만 있으면 아무 데도 안 붙는 유령 플래그이고, qc_one 에만 있으면
+    심각도 0 으로 취급되어 절대 verdict 가 되지 못합니다. 둘 다 조용한 결함입니다.
+    """
+    fn = find_function(core_tree, "qc_one")
+    if fn is None:
+        report.add("B", "FLAG_SEV 대 qc_one 의 실제 플래그", FAIL,
+                   "core.py 에서 qc_one 을 찾지 못했습니다")
+        return
+    used = flags_appended_in(fn)
+    sev = set(core.RULES["FLAG_SEV"])
+    ghost = sorted(sev - used)
+    orphan = sorted(used - sev)
+    report.ok("B", "FLAG_SEV 대 qc_one 의 실제 플래그", not ghost and not orphan,
+              "%d 개 양방향 일치" % len(sev),
+              "FLAG_SEV 에만 있음(유령): %s / qc_one 에만 있음(심각도 0): %s"
+              % (", ".join(ghost) or "-", ", ".join(orphan) or "-"))
+
+
 def check_judgment_design_keys(report, core):
     """design_hash 대상 키가 실제로 존재하는 설계 키인지. 유령 키를 막는다."""
     keys = list(core.JUDGMENT_DESIGN_KEYS)
@@ -1128,9 +1180,48 @@ def check_landmark_units(report, core):
                      r["sub"], r["gap"], r["pos"]))
 
 
-# --- index.html 의 badge() 가 위 5 종을 모두 처리하는가 ------------------------
+# --- 스터퍼 길이 판정 (PARENTAL / PARENTAL?) 합성 시험 -------------------------
+# 실측 testdata 에는 인서트 386 bp 인 클론이 없어 [D] 로는 이 분기가 한 번도
+# 실행되지 않습니다. .ab1 없이 qc_one 을 돌리려면 raw_seq / raw_qual / trace /
+# ploc 을 갖춘 dict 면 충분합니다. raw_qual=[] 이면 트리밍을 건너뛰고,
+# trace={} 이면 mix_pct 가 None 이라 MIXED 가 붙지 않습니다. 둘 다 이 시험의
+# 판정 대상이 아니므로 결과에 영향이 없습니다.
+UNIT_FILL = "ATTC"          # NotI / AscI / 링커와 무관한 채움 서열
+
+
+def synth_stuffer_read(core, with_stuffer):
+    """인서트(NotI 첫 염기 ~ AscI 끝)가 정확히 STUFFER_INSERT_BP 인 합성 read."""
+    C = core.CONST
+    q1off = C["QC1"].find(C["NotI"])
+    span = len(C["QC1"]) - q1off + len(C["AscI"])     # NotI 시작 ~ QC1 끝, 그리고 AscI
+    mid_len = C["STUFFER_INSERT_BP"] - span
+    filler = UNIT_FILL * (mid_len // len(UNIT_FILL) + 2)
+    mid = (C["STUFFER"] + filler)[:mid_len] if with_stuffer else filler[:mid_len]
+    seq = C["PELB_ATG"] + "GGG" + C["QC1"] + mid + C["QC3"] + C["QC4"] + "A" * 20
+    return {"id": "syn", "clone": "syn", "batch": "", "date": "", "primer": "",
+            "filename": "synthetic.ab1", "raw_len": len(seq),
+            "raw_seq": seq, "raw_qual": [], "trace": {}, "ploc": []}
+
+
+def check_stuffer_units(report, core):
+    cfg = core.build_config(None, [])
+    want_bp = core.CONST["STUFFER_INSERT_BP"]
+    cases = [("E12", "insert %d · 스터퍼 서열 있음" % want_bp, True, "PARENTAL", "PARENTAL?"),
+             ("E13", "insert %d · 스터퍼 서열 없음" % want_bp, False, "PARENTAL?", "PARENTAL")]
+    for tag, label, with_stuffer, want, unwanted in cases:
+        r = core.qc_one(synth_stuffer_read(core, with_stuffer), cfg)
+        good = (r["insert_bp"] == want_bp
+                and want in r["flags"] and unwanted not in r["flags"])
+        report.ok("E", tag + " " + label, good,
+                  "insert %s · %s 포함 · %s 미포함 · verdict %s"
+                  % (r["insert_bp"], want, unwanted, r["verdict"]),
+                  "insert %s (기대 %d) · flags %s (%s 포함 / %s 미포함 이어야 함)"
+                  % (r["insert_bp"], want_bp, r["flags"], want, unwanted))
+
+
+# --- index.html 의 badge() 가 아래 표시값을 모두 처리하는가 --------------------
 BADGE_EXPECT = [("OK", "b-pass"), ("S1G0", "b-warn"), ("GAP2", "b-fail"),
-                ("ABSENT", "b-fail"), ("NA", "b-none")]
+                ("ABSENT", "b-fail"), ("NA", "b-none"), ("PARENTAL?", "b-check")]
 
 _BADGE_RULE_RE = re.compile(
     r"^\s*if\s*\((?P<cond>.+?)\)\s*return\s*'<span class=\"badge (?P<cls>b-[a-z]+)\"")
@@ -1180,11 +1271,13 @@ def badge_class(body, s):
     return None, "return 없음"
 
 
+BADGE_LABEL = "badge() 표시값 %d 종" % len(BADGE_EXPECT)
+
+
 def check_badge_states(report, js):
     body = js_function_body(js, "badge")
     if body is None:
-        report.add("E", "badge() 랜드마크 상태 5 종", FAIL,
-                   "index.html 에서 badge() 를 찾지 못했습니다")
+        report.add("E", BADGE_LABEL, FAIL, "index.html 에서 badge() 를 찾지 못했습니다")
         return
     bad, shown = [], []
     for s, want in BADGE_EXPECT:
@@ -1193,7 +1286,7 @@ def check_badge_states(report, js):
                                   "*" if how == "기본값" else ""))
         if cls != want:
             bad.append("%s 기대 %s 실제 %s(%s)" % (s, want, cls, how))
-    report.ok("E", "badge() 랜드마크 상태 5 종", not bad,
+    report.ok("E", BADGE_LABEL, not bad,
               " ".join(shown) + "  (*기본값)", " / ".join(bad))
 
 
@@ -1253,6 +1346,8 @@ def main():
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
+        guard(report, "B", "FLAG_SEV 대 qc_one 의 실제 플래그",
+              check_flag_sev_keys, report, core, core_tree)
         guard(report, "B", "RULES 대 RULES_DOC 키", check_rules_doc, report, core)
         guard(report, "B", "옛 모듈 상수 잔존", check_moved_constants, report, core)
         guard(report, "B", "RULES 노출", check_rules_exposed,
@@ -1269,6 +1364,7 @@ def main():
               report, reg_out, reg_note, reg_status)
 
         guard(report, "E", "check_landmark 단위", check_landmark_units, report, core)
+        guard(report, "E", "스터퍼 길이 판정 단위", check_stuffer_units, report, core)
 
     guard(report, "E", "badge() 랜드마크 상태 5 종", check_badge_states, report, js)
 

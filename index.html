@@ -659,7 +659,7 @@ function badge(v){
   if (/^S\d+G\d+$/.test(s)) return '<span class="badge b-warn">' + esc(s) + "</span>";
   if (s === "OK") return '<span class="badge b-pass">OK</span>';
   if (s === "NA" || s === "-" || s === "") return '<span class="badge b-none">' + (s||"-") + "</span>";
-  if (s === "LONG_INSERT?" || s === "LOW_COVERAGE") return '<span class="badge b-check">' + esc(s) + "</span>";
+  if (s === "LONG_INSERT?" || s === "LOW_COVERAGE" || s === "PARENTAL?") return '<span class="badge b-check">' + esc(s) + "</span>";
   return '<span class="badge b-fail">' + esc(s) + "</span>";
 }
 const BADGECOL = new Set(["최종판정","구조QC","QC1","QC2","QC3","QC4","내부종결"]);
