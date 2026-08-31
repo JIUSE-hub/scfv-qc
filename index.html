@@ -655,6 +655,7 @@ function badge(v){
   if (s === "PASS") return '<span class="badge b-pass">PASS</span>';
   if (s === "PASS*") return '<span class="badge b-pass">PASS*</span>';
   if (s === "WARN") return '<span class="badge b-warn">WARN</span>';
+  if (/^S\d+G\d+$/.test(s)) return '<span class="badge b-warn">' + esc(s) + "</span>";
   if (s === "OK") return '<span class="badge b-pass">OK</span>';
   if (s === "NA" || s === "-" || s === "") return '<span class="badge b-none">' + (s||"-") + "</span>";
   if (s === "LONG_INSERT?" || s === "LOW_COVERAGE") return '<span class="badge b-check">' + esc(s) + "</span>";

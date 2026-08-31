@@ -11,6 +11,8 @@ verify.py — pAIM1 scFv QC 웹도구 자체 검사
   [B] 계약   index.html 이 참조하는 컬럼명·키가 core.py 가 실제로 주는 것인가
   [C] 누출   index.html 에 서열이 하드코딩되어 있지 않은가
   [D] 회귀   testdata/ 로 core.analyze 를 돌려 알려진 값이 재현되는가
+  [E] 단위   합성 서열로 core.check_landmark 의 5 개 상태를 직접 확인하고,
+             index.html 의 badge() 가 그 5 종을 모두 처리하는지 대조
 
 표준 라이브러리만 사용합니다.
 node 와 openpyxl 은 있으면 쓰고 없으면 해당 검사를 "건너뜀" 으로 표시합니다.
@@ -31,7 +33,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.0"
+VERIFY_VERSION = "1.1"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -912,6 +914,139 @@ def check_xlsx_roundtrip(report, sheets, data):
 
 
 # =============================================================================
+#  [E] 단위 — 실측 testdata 가 밟지 않는 랜드마크 분기
+# =============================================================================
+# testdata 4 클론의 랜드마크 gap 은 {0, 1} 뿐이라 GAP# 분기가 한 번도 실행되지
+# 않습니다. 합성 서열로 check_landmark 를 직접 불러 그 구간을 덮습니다.
+UNIT_PRE = "T" * 20                 # 랜드마크와 무관한 5' 패딩
+UNIT_SUF = "A" * 20                 # 랜드마크와 무관한 3' 패딩
+UNIT_ALIEN = ("ATTC" * 12)[:45]     # 랜드마크 자리에 넣을 무관한 45 nt
+UNIT_SUB2 = (6, 22)                 # 치환 위치 — 허용치(lm_max_sub) 이내
+UNIT_SUB3 = (6, 22, 38)             # 치환 위치 — 허용치 초과
+UNIT_DEL_AT = 12                    # 결실 시작 위치 (동종중합 구간 밖)
+_TRANSITION = {"A": "G", "G": "A", "C": "T", "T": "C"}
+
+#        태그   설명                    변형종류  인자        기대 status  기대 level
+UNIT_CASES = [
+    ("E1", "변형 없음",             "sub",   (),        "OK",     "OK"),
+    ("E2", "치환 2 개 (허용 이내)", "sub",   UNIT_SUB2, "OK",     "OK"),
+    ("E3", "치환 3 개 (허용 초과)", "sub",   UNIT_SUB3, "S3G0",   "WARN"),
+    ("E4", "1 nt 결실",             "del",   1,         "S0G1",   "WARN"),
+    ("E5", "2 nt 결실",             "del",   2,         "GAP2",   "FAIL"),
+    ("E6", "3 nt 결실",             "del",   3,         "GAP3",   "FAIL"),
+    ("E7", "무관한 서열",           "alien", None,      "ABSENT", "FAIL"),
+    ("E8", "covered=False",         "na",    None,      "NA",     "NA"),
+]
+
+
+def mutate_landmark(lm, kind, arg):
+    if kind == "sub":
+        b = list(lm)
+        for p in arg:
+            b[p] = _TRANSITION[b[p]]
+        return "".join(b)
+    if kind == "del":
+        return lm[:UNIT_DEL_AT] + lm[UNIT_DEL_AT + arg:]
+    if kind == "alien":
+        return UNIT_ALIEN
+    return lm
+
+
+def check_landmark_units(report, core):
+    cfg = core.build_config(None, [])
+    lm = core.CONST["QC2"]
+
+    # 패딩과 대체서열이 랜드마크와 우연히 맞지 않는지 먼저 확인한다.
+    su, _pu = core.ungapped_scan(lm, UNIT_PRE + UNIT_ALIEN + UNIT_SUF)
+    report.ok("E", "패딩·대체서열 무관성", su > cfg["lm_max_sub"],
+              "랜드마크 없는 서열의 최소 불일치 %d > 허용 치환 %d" % (su, cfg["lm_max_sub"]),
+              "패딩이 랜드마크와 우연히 맞습니다 (불일치 %d ≤ 허용 %d)"
+              % (su, cfg["lm_max_sub"]))
+
+    for tag, label, kind, arg, want_st, want_lv in UNIT_CASES:
+        seq = UNIT_PRE + mutate_landmark(lm, kind, arg) + UNIT_SUF
+        r = core.check_landmark(lm, seq, [], kind != "na", cfg)
+        good = (r["status"] == want_st and r["level"] == want_lv)
+        detail = "status %s · level %s" % (want_st, want_lv)
+        if tag == "E1":
+            good = good and r["pos"] == len(UNIT_PRE)
+            detail += " · 위치 %d" % r["pos"]
+        report.ok("E", tag + " " + label, good, detail,
+                  "기대 %s/%s · 실제 %s/%s (sub %d, gap %d, pos %d)"
+                  % (want_st, want_lv, r["status"], r["level"],
+                     r["sub"], r["gap"], r["pos"]))
+
+
+# --- index.html 의 badge() 가 위 5 종을 모두 처리하는가 ------------------------
+BADGE_EXPECT = [("OK", "b-pass"), ("S1G0", "b-warn"), ("GAP2", "b-fail"),
+                ("ABSENT", "b-fail"), ("NA", "b-none")]
+
+_BADGE_RULE_RE = re.compile(
+    r"^\s*if\s*\((?P<cond>.+?)\)\s*return\s*'<span class=\"badge (?P<cls>b-[a-z]+)\"")
+_BADGE_DEFAULT_RE = re.compile(
+    r"^\s*return\s*'<span class=\"badge (?P<cls>b-[a-z]+)\"")
+
+
+def _js_unquote(text):
+    return text.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def eval_badge_cond(cond, s):
+    """badge() 의 조건식을 제한 해석한다. 해석하지 못하면 None."""
+    for part in cond.split("||"):
+        part = part.strip()
+        m = re.fullmatch(r's\s*===\s*"((?:[^"\\]|\\.)*)"', part)
+        if m:
+            if s == _js_unquote(m.group(1)):
+                return True
+            continue
+        m = re.fullmatch(r"/(.+)/[a-z]*\.test\(s\)", part)
+        if m:
+            try:
+                if re.search(m.group(1), s):
+                    return True
+            except re.error:
+                return None
+            continue
+        return None
+    return False
+
+
+def badge_class(body, s):
+    """badge() 본문을 위에서부터 따라가며 s 가 받을 클래스와 명시/기본 여부."""
+    for line in body.splitlines():
+        m = _BADGE_RULE_RE.match(line)
+        if m:
+            got = eval_badge_cond(m.group("cond"), s)
+            if got is None:
+                return None, "해석실패"
+            if got:
+                return m.group("cls"), "명시"
+            continue
+        m = _BADGE_DEFAULT_RE.match(line)
+        if m:
+            return m.group("cls"), "기본값"
+    return None, "return 없음"
+
+
+def check_badge_states(report, js):
+    body = js_function_body(js, "badge")
+    if body is None:
+        report.add("E", "badge() 랜드마크 상태 5 종", FAIL,
+                   "index.html 에서 badge() 를 찾지 못했습니다")
+        return
+    bad, shown = [], []
+    for s, want in BADGE_EXPECT:
+        cls, how = badge_class(body, s)
+        shown.append("%s:%s%s" % (s, (cls or how).replace("b-", ""),
+                                  "*" if how == "기본값" else ""))
+        if cls != want:
+            bad.append("%s 기대 %s 실제 %s(%s)" % (s, want, cls, how))
+    report.ok("E", "badge() 랜드마크 상태 5 종", not bad,
+              " ".join(shown) + "  (*기본값)", " / ".join(bad))
+
+
+# =============================================================================
 #  실행
 # =============================================================================
 def main():
@@ -974,6 +1109,10 @@ def main():
         guard(report, "D", "회귀", check_regression,
               report, reg_out, reg_note, reg_status)
 
+        guard(report, "E", "check_landmark 단위", check_landmark_units, report, core)
+
+    guard(report, "E", "badge() 랜드마크 상태 5 종", check_badge_states, report, js)
+
     ver = "core %s / notebook %s" % (core.CORE_VERSION, core.NB_VERSION) \
         if core is not None else "core.py 불러오기 실패"
     print("pAIM1 scFv QC — verify.py %s   (%s)" % (VERIFY_VERSION, ver))
@@ -981,7 +1120,7 @@ def main():
     print_table(report)
     print("")
     parts = []
-    for s in ("A", "B", "C", "D"):
+    for s in ("A", "B", "C", "D", "E"):
         parts.append("[%s] 통과 %d 실패 %d 건너뜀 %d"
                      % (s, report.count(s, PASS), report.count(s, FAIL),
                         report.count(s, SKIP)))
