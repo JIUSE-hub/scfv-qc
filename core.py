@@ -201,10 +201,19 @@ DESIGN_DEFAULT_MAP = dict(DESIGN_DEFAULTS)
 RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
 
 # 설계 항목 중 판정 분기를 실제로 만드는 것만 모읍니다. design_hash 의 대상입니다.
-#   batch_vh_family / batch_chain : call_one 에서 WRONG_FAMILY / WRONG_CHAIN 을 만든다
-#   f1_for_mode / f2_for_mode     : 둘 다 "분리" 일 때만 CDR3 경계 정합성 검사를 돌린다
-# 나머지 설계 항목(f1_rev/f2_rev/f3_* , cdna_frag1~3, rna_*)은 05_실행설정에 개별
-# 기록되지만 cfg 에서 읽혀 판정을 가르는 곳이 없어 제외합니다.
+#   batch_vh_family / batch_chain
+#       call_one 에서 WRONG_FAMILY / WRONG_CHAIN 플래그를 만들고, compose 의
+#       batch_vh_match / batch_chain_match 집계와 04_배치조성 "대조" 행까지 좌우한다.
+#   f1_for_mode / f2_for_mode
+#       둘 다 "분리" 일 때만 CDR3 경계 정합성 검사를 돌린다 (HETERO_JOIN?).
+#
+# 제외한 설계 항목은 두 부류이며, 둘 다 05_실행설정에 개별 기록됩니다.
+#   cfg 에서 아예 읽히지 않음 :
+#       f1_rev_mode, f2_rev_mode, f3_for_mode, f3_rev_mode,
+#       f3_product_pooled, cdna_frag1~3
+#   읽히지만 판정 분기가 아님 :
+#       rna_bone_marrow, rna_peripheral — build_config 에서 rna_source
+#       표시 문자열을 조립할 때만 쓰인다.
 JUDGMENT_DESIGN_KEYS = ["batch_vh_family", "batch_chain",
                         "f1_for_mode", "f2_for_mode"]
 
