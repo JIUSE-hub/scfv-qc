@@ -14,6 +14,34 @@ verify.py — pAIM1 scFv QC 웹도구 자체 검사
   [E] 단위   합성 서열로 core.check_landmark 의 5 개 상태를 직접 확인하고,
              index.html 의 badge() 가 그 5 종을 모두 처리하는지 대조
 
+RULES 커버리지
+------------------------------------------------------------------------------
+core.RULES 8 개를 하나씩 교란해 실측한 결과입니다. RULES 를 건드릴 때
+무엇이 보호되고 무엇이 보호되지 않는지 여기서 확인하세요.
+
+  키                  감지하는 검사              근거 / 공백 사유
+  ------------------  -------------------------  --------------------------------
+  AL_MATCH            D 클론별 판정·길이         1->2 에서 c01 verdict 가
+                      E7, E11                    NO_LINKER -> LINKER_DEL 로 뒤집힘
+  AL_MIS              D 클론별 판정·길이         -1->-2 에서 위와 동일
+                      E7, E11
+  AL_GAP              E9, E10                    E9 는 갭 1 개와 치환 2 개가
+                                                 박빙인 결실 위치 3 을 씀
+  AL_FLANK            E10                        삽입이 DP 창을 넘어설 때만
+                                                 갈림. 결실로는 갈리지 않음
+  FLAG_SEV            D 클론별 판정·길이 (일부)  testdata 가 실제로 만드는 7 개
+                                                 플래그만. NO_LINKER 3->1 은 잡히나
+                                                 MIXED 등 미발생 플래그는 미시험
+  REPEAT_MAX_PERIOD   미시험                     60->10 이면 c03 의 TANDEM_REPEAT
+                                                 가 사라지지만, 플래그 목록을
+                                                 단언하는 검사가 없음
+  EXO_TRIM            미시험                     0~6 어느 값에서도 testdata 의
+                                                 CDR3 경계 판정이 바뀌지 않음
+                                                 (민감한 클론이 없음)
+  OVERLONG_ZONE       미시험                     5->200 이면 overlong_suspect 에
+                                                 c01, c03 이 생기지만 이를
+                                                 단언하는 검사가 없음
+
 표준 라이브러리만 사용합니다.
 node 와 openpyxl 은 있으면 쓰고 없으면 해당 검사를 "건너뜀" 으로 표시합니다.
 기대값은 별도 파일이 아니라 이 파일 안의 EXPECT 리터럴에 둡니다
@@ -33,7 +61,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.3"
+VERIFY_VERSION = "1.4"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -990,9 +1018,13 @@ UNIT_DEL_AT = 12                    # 결실 시작 위치 (동종중합 구간 
 # AL_GAP 이 -3 이 되면 S2G1/WARN 으로 내려앉는다. AL_GAP 회귀 감지용.
 # 같은 위치라도 n=1 / n=3 은 격차가 커서 갈리지 않으므로 n=2 만 쓴다.
 UNIT_DEL_TIGHT = 3
+UNIT_INS_AT = 12                    # 삽입 위치
+# 삽입 염기. QC2 의 최장 C 연속은 2 라 6~12 nt C 런은 랜드마크와 무관하다.
+# (45 nt 로 환산했을 때 최소 불일치 37 > 허용 치환 2 — 아래 무관성 검사에서 확인)
+UNIT_INS_UNIT = "C"
 _TRANSITION = {"A": "G", "G": "A", "C": "T", "T": "C"}
 
-#        태그   설명                      변형종류  인자                기대 status  기대 level
+#        태그    설명                      변형종류  인자               기대 status  기대 level
 UNIT_CASES = [
     ("E1", "변형 없음",             "sub",   (),                    "OK",     "OK"),
     ("E2", "치환 2 개 (허용 이내)", "sub",   UNIT_SUB2,             "OK",     "OK"),
@@ -1003,6 +1035,12 @@ UNIT_CASES = [
     ("E7", "무관한 서열",           "alien", None,                  "ABSENT", "FAIL"),
     ("E8", "covered=False",         "na",    None,                  "NA",     "NA"),
     ("E9", "결실 위치 3 · 2 nt 결실", "del", (UNIT_DEL_TIGHT, 2),   "GAP2",   "FAIL"),
+    # AL_FLANK 가 12 미만이면 ABSENT 로 떨어진다. AL_FLANK 회귀 감지용.
+    # 기대값은 RULES 값에 연동하지 않고 GAP6 으로 고정한다. 연동하면 상수가
+    # 바뀔 때 기대값도 따라 바뀌어 회귀를 못 잡는다.
+    ("E10", "6 nt 삽입",            "ins",   (UNIT_INS_AT, 6),      "GAP6",   "FAIL"),
+    # flank 12 로도 담기지 않는 크기. 창을 넘어선 삽입의 판정을 고정한다.
+    ("E11", "12 nt 삽입",           "ins",   (UNIT_INS_AT, 12),     "ABSENT", "FAIL"),
 ]
 
 
@@ -1015,6 +1053,9 @@ def mutate_landmark(lm, kind, arg):
     if kind == "del":
         pos, n = arg
         return lm[:pos] + lm[pos + n:]
+    if kind == "ins":
+        pos, n = arg
+        return lm[:pos] + (UNIT_INS_UNIT * n)[:n] + lm[pos:]
     if kind == "alien":
         return UNIT_ALIEN
     return lm
@@ -1024,12 +1065,18 @@ def check_landmark_units(report, core):
     cfg = core.build_config(None, [])
     lm = core.CONST["QC2"]
 
-    # 패딩과 대체서열이 랜드마크와 우연히 맞지 않는지 먼저 확인한다.
-    su, _pu = core.ungapped_scan(lm, UNIT_PRE + UNIT_ALIEN + UNIT_SUF)
-    report.ok("E", "패딩·대체서열 무관성", su > cfg["lm_max_sub"],
-              "랜드마크 없는 서열의 최소 불일치 %d > 허용 치환 %d" % (su, cfg["lm_max_sub"]),
-              "패딩이 랜드마크와 우연히 맞습니다 (불일치 %d ≤ 허용 %d)"
-              % (su, cfg["lm_max_sub"]))
+    # 패딩·대체서열·삽입서열이 랜드마크와 우연히 맞지 않는지 먼저 확인한다.
+    scores, bad = [], []
+    for name, mid in (("대체", UNIT_ALIEN),
+                      ("삽입", (UNIT_INS_UNIT * len(lm))[:len(lm)])):
+        su, _pu = core.ungapped_scan(lm, UNIT_PRE + mid + UNIT_SUF)
+        scores.append("%s %d" % (name, su))
+        if su <= cfg["lm_max_sub"]:
+            bad.append("%s 서열이 랜드마크와 맞습니다 (불일치 %d ≤ 허용 %d)"
+                       % (name, su, cfg["lm_max_sub"]))
+    report.ok("E", "패딩·대체·삽입 서열 무관성", not bad,
+              "최소 불일치 " + " / ".join(scores) + " > 허용 치환 %d" % cfg["lm_max_sub"],
+              " / ".join(bad))
 
     for tag, label, kind, arg, want_st, want_lv in UNIT_CASES:
         seq = UNIT_PRE + mutate_landmark(lm, kind, arg) + UNIT_SUF
