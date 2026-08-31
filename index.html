@@ -329,6 +329,8 @@ def js_docs():
     return json.dumps({
         "const": [{"key": k, "value": str(core.CONST[k]), "desc": d}
                   for k, d in core.CONST_DOC],
+        "rules": [{"key": k, "value": core.rule_value_text(k), "desc": d}
+                  for k, d in core.RULES_DOC],
         "glossary": core.glossary(),
         "thresh": [{"key": k, "label": core.CFG_DOC[k][0], "desc": core.CFG_DOC[k][1],
                     "default": core.CFG_DEFAULT_MAP[k],
@@ -763,14 +765,20 @@ function buildDocs(){
     if (!groups.has(cat)) groups.set(cat, []);
     groups.get(cat).push([term, desc]);
   });
+  const constGroup = (title, items) =>
+    '<div class="grp"><h3>' + esc(title) + "</h3>" +
+    items.map(c => '<div class="constrow"><div class="k">' + esc(c.key) +
+      '</div><div><div class="v">' + esc(c.value) + '</div><div class="c">' +
+      esc(c.desc) + "</div></div></div>").join("") + "</div>";
+
   let h = "<details open><summary>코드에 고정된 값" +
-    '<span class="cnt">' + DOC.const.length + " 항목 · UI 에서 바꿀 수 없습니다</span></summary>" +
-    '<div class="body"><div class="note">서열과 프레임 규칙만 고정되어 있습니다. ' +
-    "판정에 쓰이는 수치는 전부 위 &lsquo;설정&rsquo; 의 판정 임계값에 있습니다.</div>";
-  DOC.const.forEach(c => h += '<div class="constrow"><div class="k">' + esc(c.key) +
-    '</div><div><div class="v">' + esc(c.value) + '</div><div class="c">' +
-    esc(c.desc) + "</div></div></div>");
-  h += "</div></details>";
+    '<span class="cnt">' + (DOC.const.length + DOC.rules.length) +
+    " 항목 · UI 에서 바꿀 수 없습니다</span></summary>" +
+    '<div class="body"><div class="note">서열·프레임 규칙과 알고리즘 규칙 두 계층입니다. ' +
+    "둘 다 param_hash 에 들어가지 않습니다. " +
+    "판정에 쓰이는 수치는 전부 위 &lsquo;설정&rsquo; 의 판정 임계값에 있습니다.</div>" +
+    constGroup("서열", DOC.const) + constGroup("알고리즘", DOC.rules) +
+    "</div></details>";
   groups.forEach((items, cat) => {
     h += "<details><summary>" + esc(cat) +
       '<span class="cnt">' + items.length + " 항목</span></summary><div class=\"body\">" +

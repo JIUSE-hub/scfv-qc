@@ -14,8 +14,11 @@ UI 와 파일 입출력에서 분리해 옮긴 모듈입니다.
   2. 전역 가변 상태를 두지 않습니다. 판정 수치는 항상 cfg 인자로 전달합니다.
      (노트북의 전역 CFG 를 인자로 바꾼 것 외에 판정 로직은 동일합니다.)
   3. 화면 출력을 하지 않습니다. 모든 결과를 JSON 직렬화 가능한 값으로 반환합니다.
-  4. 코드에 고정된 것은 서열과 프레임 규칙뿐입니다 (CONST).
-     판정에 쓰이는 수치는 전부 CFG_DEFAULTS 를 기본값으로 하는 cfg 에서 옵니다.
+  4. 코드에 고정된 값은 두 계층입니다.
+       CONST  서열과 프레임 규칙
+       RULES  알고리즘 규칙 (정렬 점수, 탐색 범위, 플래그 심각도)
+     둘 다 UI 로 조절하지 않으며, 05_실행설정 시트와 화면 하단에 전부 노출됩니다.
+     판정 임계값은 CFG_DEFAULTS 를 통해 UI 로 제어하며 param_hash 에 포함됩니다.
 
 사용법
     import core
@@ -31,11 +34,13 @@ import json
 import re
 import struct
 
-CORE_VERSION = "1.0"
+CORE_VERSION = "1.1"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
-#  1. 코드에 고정된 상수  (노트북 Cell 1 의 CONST 와 동일)
+#  1. 코드에 고정된 값 : CONST(서열·프레임) 와 RULES(알고리즘)
+#     둘 다 UI 로 조절하지 않고 param_hash 에도 들어가지 않습니다.
+#     값은 노트북 Cell 1 과 동일하며, 이번 계층 분리에서 이동만 했습니다.
 # =============================================================================
 CONST = {
     "NotI": "GCGGCCGC",
@@ -53,6 +58,7 @@ CONST = {
     "TAG_F3_Rev": "GTGCGCAGGCGCGCC",
     "MOTIF_F1_Rev": "ACAGTAATA",
     "MOTIF_F2_For": "TATTACTGT",
+    "FR4_MOTIF": "WG.G",
     "FRAME_MOD": 2,
 }
 
@@ -72,18 +78,56 @@ CONST_DOC = [
     ("TAG_F3_Rev", "프라이머 자동분류용 5' 태그"),
     ("MOTIF_F1_Rev", "프라이머 자동분류용 내부 모티프"),
     ("MOTIF_F2_For", "프라이머 자동분류용 내부 모티프"),
+    ("FR4_MOTIF", "VH FR4 보존 모티프 (Trp-Gly-Xxx-Gly). CDR3-H3 끝 지점 결정"),
     ("FRAME_MOD", "프레임 유지 조건 : insert 길이 % 3 == 이 값"),
 ]
 
-# --- 알고리즘 내부 상수 (판정 기준이 아님) -----------------------------------
-_AL_MATCH = 1          # 정렬 일치 점수
-_AL_MIS = -1           # 정렬 불일치 점수
-_AL_GAP = -2           # 정렬 갭 점수
-_AL_FLANK = 12         # DP 창의 양쪽 여유 (nt)
-_REPEAT_MAX_PERIOD = 60    # 탠덤 반복 탐색 최대 주기 (nt)
-_EXO_TRIM = 3          # CDR3 경계 정합성 검사에서 제외할 양끝 nt
-_OVERLONG_ZONE = 5     # For-Over-long 영향 구간 (판별구간 앞 n nt)
-_FR4_MOTIF = "WG.G"    # VH FR4 보존 모티프
+# --- 알고리즘 규칙 -----------------------------------------------------------
+# 판정 임계값(CFG_DEFAULTS)과 달리 UI 로 조절하지 않지만, 판정 결과에는
+# 직접 작용합니다. CONST 와 나란히 05_실행설정 시트와 화면 하단에 노출합니다.
+RULES = {
+    "AL_MATCH": 1,
+    "AL_MIS": -1,
+    "AL_GAP": -2,
+    "AL_FLANK": 12,
+    "REPEAT_MAX_PERIOD": 60,
+    "EXO_TRIM": 3,
+    "OVERLONG_ZONE": 5,
+    "FLAG_SEV": {
+        "CONCATEMER": 3, "PARENTAL": 3, "NO_NOTI": 3, "NO_ASCI": 3, "NO_LINKER": 3,
+        "TOO_SHORT": 3, "TOO_LONG": 3, "FRAMESHIFT": 3, "INTERNAL_STOP": 3,
+        "LINKER_DEL": 3, "QC_DEL": 3, "QC_ABSENT": 3,
+        "ABERRANT_D1": 3, "ABERRANT_D2": 3, "TANDEM_REPEAT": 3, "MIXED": 3,
+        "LONG_INSERT?": 2, "LOW_COVERAGE": 2,
+        "QC_WARN": 1,
+    },
+}
+
+RULES_DOC = [
+    ("AL_MATCH", "랜드마크 정렬의 일치 점수. 치환/갭 개수 산출에 영향"),
+    ("AL_MIS", "랜드마크 정렬의 불일치 점수"),
+    ("AL_GAP", "랜드마크 정렬의 갭 점수. 값이 클수록 갭보다 치환으로 정렬됨"),
+    ("AL_FLANK", "정렬 DP 창의 양쪽 여유 (nt). 검출 가능한 결실 폭의 상한"),
+    ("REPEAT_MAX_PERIOD", "탠덤 반복 탐색의 최대 주기 (nt). 이보다 긴 반복은 검출하지 않음"),
+    ("EXO_TRIM", "CDR3 경계 정합성 검사에서 제외하는 양끝 nt. "
+                 "proofreading exonuclease 모자이크 보정"),
+    ("OVERLONG_ZONE", "F1_For 불일치 편중을 점검하는 판별구간 앞쪽 범위 (nt)"),
+    ("FLAG_SEV", "플래그별 심각도. 여러 플래그가 동시에 붙을 때 어느 것을 verdict 로 삼을지 결정"),
+]
+
+
+def sev_flags(level):
+    """FLAG_SEV 에서 해당 심각도의 플래그 이름을 정의 순서대로 뽑는다."""
+    return [k for k, v in RULES["FLAG_SEV"].items() if v == level]
+
+
+def rule_value_text(key):
+    """RULES 값을 표·화면에 넣을 문자열. dict 는 길어서 요약한다."""
+    v = RULES[key]
+    if isinstance(v, dict):
+        levels = sorted(set(v.values()), reverse=True)
+        return "%d 종 매핑 (심각도 %s)" % (len(v), "/".join(str(x) for x in levels))
+    return str(v)
 
 
 # =============================================================================
@@ -548,18 +592,19 @@ def dp_align(lm, win):
     m, n = len(lm), len(win)
     if n == 0:
         return m, 0, 0
+    s_match, s_mis, s_gap = RULES["AL_MATCH"], RULES["AL_MIS"], RULES["AL_GAP"]
     D = [[0] * (n + 1) for _ in range(m + 1)]
     P = [[2] * (n + 1) for _ in range(m + 1)]
     for i in range(1, m + 1):
-        D[i][0] = _AL_GAP * i
+        D[i][0] = s_gap * i
         P[i][0] = 1
     for i in range(1, m + 1):
         li = lm[i - 1]
         cur, prev, pc = D[i], D[i - 1], P[i]
         for j in range(1, n + 1):
-            a = prev[j - 1] + (_AL_MATCH if hit(li, win[j - 1]) else _AL_MIS)
-            b = prev[j] + _AL_GAP
-            c = cur[j - 1] + _AL_GAP
+            a = prev[j - 1] + (s_match if hit(li, win[j - 1]) else s_mis)
+            b = prev[j] + s_gap
+            c = cur[j - 1] + s_gap
             if a >= b and a >= c:
                 cur[j], pc[j] = a, 0
             elif b >= c:
@@ -603,8 +648,8 @@ def check_landmark(lm, seq, qual, covered, cfg):
     if su <= cfg["lm_max_sub"]:
         res.update(sub=su, pos=pu, status="OK", level="OK")
     else:
-        lo = max(0, pu - _AL_FLANK)
-        hi = min(len(seq), pu + len(lm) + _AL_FLANK)
+        lo = max(0, pu - RULES["AL_FLANK"])
+        hi = min(len(seq), pu + len(lm) + RULES["AL_FLANK"])
         sub, gap, st = dp_align(lm, seq[lo:hi])
         res.update(sub=sub, gap=gap, pos=lo + st)
         budget = cfg["lm_max_sub"] + cfg["lm_gap_fail"]
@@ -624,7 +669,7 @@ def check_landmark(lm, seq, qual, covered, cfg):
 
 
 def find_tandem(seq, min_len):
-    for period in range(min_len, min(_REPEAT_MAX_PERIOD, len(seq) // 2) + 1):
+    for period in range(min_len, min(RULES["REPEAT_MAX_PERIOD"], len(seq) // 2) + 1):
         for i in range(0, len(seq) - 2 * period + 1):
             if seq[i:i + period] == seq[i + period:i + 2 * period]:
                 return {"pos": i, "period": period, "unit": seq[i:i + period]}
@@ -675,16 +720,6 @@ def orient(seq):
     rev_seq = rc(seq)
     rev = sum(1 for k in _ANCHORS if CONST[k] in rev_seq)
     return ("R", rev_seq) if rev > fwd else ("F", seq)
-
-
-FLAG_SEV = {
-    "CONCATEMER": 3, "PARENTAL": 3, "NO_NOTI": 3, "NO_ASCI": 3, "NO_LINKER": 3,
-    "TOO_SHORT": 3, "TOO_LONG": 3, "FRAMESHIFT": 3, "INTERNAL_STOP": 3,
-    "LINKER_DEL": 3, "QC_DEL": 3, "QC_ABSENT": 3,
-    "ABERRANT_D1": 3, "ABERRANT_D2": 3, "TANDEM_REPEAT": 3, "MIXED": 3,
-    "LONG_INSERT?": 2, "LOW_COVERAGE": 2,
-    "QC_WARN": 1,
-}
 
 
 def qc_one(read, cfg):
@@ -842,11 +877,12 @@ def qc_one(read, cfg):
         notes.append("2순위 피크 비율 %.2f 초과 위치가 %.1f%% (임계 %.1f%%) - 혼합 콜로니 의심"
                      % (cfg["mix_ratio"], mix, cfg["mix_pct"]))
 
-    sev = max([FLAG_SEV.get(f, 0) for f in flags], default=0)
+    sev_map = RULES["FLAG_SEV"]
+    sev = max([sev_map.get(f, 0) for f in flags], default=0)
     if sev >= 3:
-        verdict = [f for f in flags if FLAG_SEV.get(f, 0) == 3][0]
+        verdict = [f for f in flags if sev_map.get(f, 0) == 3][0]
     elif sev == 2:
-        verdict = [f for f in flags if FLAG_SEV.get(f, 0) == 2][0]
+        verdict = [f for f in flags if sev_map.get(f, 0) == 2][0]
     elif sev == 1:
         verdict = "WARN"
     else:
@@ -974,7 +1010,8 @@ def cdr3_boundary(r, vh_family, primers, cfg):
     if off < 0:
         return {"status": "모티프없음"}
     st = z - off
-    a, b = _EXO_TRIM, len(p["seq"]) - _EXO_TRIM
+    trim = RULES["EXO_TRIM"]
+    a, b = trim, len(p["seq"]) - trim
     if st + a < 0 or st + b > len(s):
         return {"status": "범위밖"}
     mm = sum(1 for i in range(a, b) if not hit(p["seq"][i], s[st + i]))
@@ -991,7 +1028,7 @@ def cdr3_h3(prot):
     li = prot.find(_LINKER_AA)
     seg = prot[:li] if li >= 0 else prot
     last = None
-    for m in re.finditer(_FR4_MOTIF, seg):
+    for m in re.finditer(CONST["FR4_MOTIF"], seg):
         last = m
     if last is None:
         return None
@@ -1145,9 +1182,9 @@ def compose(primer_results, cfg):
 
     zone = [p["id"] for p in primer_results
             if p["vh"] is not None and p["vh"]["mmpos"]
-            and all(x < _OVERLONG_ZONE for x in p["vh"]["mmpos"])]
+            and all(x < RULES["OVERLONG_ZONE"] for x in p["vh"]["mmpos"])]
     res["overlong_suspect"] = zone if len(zone) >= 2 else []
-    res["overlong_zone"] = _OVERLONG_ZONE
+    res["overlong_zone"] = RULES["OVERLONG_ZONE"]
     return res
 
 
@@ -1156,6 +1193,9 @@ def compose(primer_results, cfg):
 # =============================================================================
 def glossary():
     L = CONST["QC2"]
+    sev3 = ", ".join(sev_flags(3))
+    sev2 = ", ".join(sev_flags(2))
+    sev1 = ", ".join(sev_flags(1))
     return [
         ["파일 구성", "01_판정요약", "클론 1행. 이 노트북의 결론. 여기만 봐도 통과/실패를 알 수 있습니다."],
         ["파일 구성", "02_구조QC상세", "랜드마크 정렬 수치와 위치, 플래그, 비고 원문."],
@@ -1295,6 +1335,23 @@ def glossary():
         ["판정 코드", "WRONG_CHAIN", "배치에 지정한 경쇄와 다름."],
         ["판정 코드", "HETERO_JOIN?",
          "CDR3 경계가 FR1 이 부른 family 와 부정합. fragment 1 / 2 이종 조립 의심 (약한 증거)."],
+
+        ["고정 상수", "두 계층 CONST 와 RULES",
+         "코드에 고정된 값은 두 종류다. CONST 는 서열과 프레임 규칙, RULES 는 알고리즘 규칙"
+         "(정렬 점수·탐색 범위·플래그 심각도)이다. 둘 다 UI 로 바꿀 수 없고 param_hash 에도 "
+         "들어가지 않는다. 05_실행설정 시트에 전체 목록이 기록된다."],
+        ["고정 상수", "RULES 가 판정에 미치는 영향",
+         "AL_* 는 랜드마크 정렬의 치환·갭 개수를 정하므로 QC1~QC4 의 OK/WARN/FAIL 을 좌우한다. "
+         "AL_FLANK 는 DP 창 크기라 이보다 큰 결실은 검출되지 않는다. EXO_TRIM 은 CDR3 경계 "
+         "정합성 검사 범위를, REPEAT_MAX_PERIOD 는 탠덤 반복 탐색 상한을 정한다."],
+        ["고정 상수", "FLAG_SEV",
+         "한 클론에 플래그가 여러 개 붙을 때 화면과 요약에 표시할 verdict 를 고르는 기준이다. "
+         "심각도 3(FAIL) 이 있으면 그중 첫 번째, 없으면 2(확인 필요), 그다음 1(WARN), 아무것도 "
+         "없으면 PASS 가 된다. 심각도 3: " + sev3 + ". 심각도 2: " + sev2 +
+         ". 심각도 1: " + sev1 + "."],
+        ["고정 상수", "FR4_MOTIF",
+         "VH FR4 의 보존 모티프 " + CONST["FR4_MOTIF"] + " (Trp-Gly-Xxx-Gly). 정규식으로 쓰이며 "
+         "CDR3-H3 의 끝 지점을 정한다. 이 모티프를 못 찾으면 CDR3-H3 가 추출되지 않는다."],
 
         ["재현성", "param_hash",
          "판정 임계값 16 개를 정렬해 만든 지문. 두 배치의 결과를 비교하려면 이 값이 같아야 합니다. "
@@ -1490,7 +1547,9 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
                    "O" if cfg[k] == CFG_DEFAULT_MAP[k] else "X  <-- 변경됨",
                    CFG_DOC[k][1]])
     for k, desc in CONST_DOC:
-        r5.append(["고정 상수", k, str(CONST[k]), "", "(코드 고정)", desc])
+        r5.append(["고정 상수 (서열)", k, str(CONST[k]), "", "(코드 고정)", desc])
+    for k, desc in RULES_DOC:
+        r5.append(["고정 상수 (알고리즘)", k, rule_value_text(k), "", "(코드 고정)", desc])
     sheets.append({
         "title": "05_실행설정", "headers": h5, "rows": r5, "wrap": [5], "maxw": 60,
         "note": "이 배치의 판정에 실제로 쓰인 값 전부입니다. "

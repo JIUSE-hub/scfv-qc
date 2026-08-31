@@ -33,7 +33,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.1"
+VERIFY_VERSION = "1.2"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -695,6 +695,68 @@ def check_readconfig_covers_design(report, js, core):
               "index.html 이 보내지 않는 키: " + ", ".join(gone))
 
 
+# 이슈 2 에서 CONST / RULES 로 옮긴 옛 모듈 상수. 이름이 남아 있으면 이동이 덜 끝난 것.
+MOVED_AWAY = ("_AL_MATCH", "_AL_MIS", "_AL_GAP", "_AL_FLANK",
+              "_REPEAT_MAX_PERIOD", "_EXO_TRIM", "_OVERLONG_ZONE", "_FR4_MOTIF")
+
+
+def sheets_for_check(core, reg_out):
+    """시트 구조 검사용. 실행 결과가 있으면 그걸 쓰고, 없으면 빈 입력으로 만든다."""
+    if reg_out is not None and reg_out.get("sheets"):
+        return reg_out["sheets"]
+    cfg = core.build_config(None, [])
+    return core.build_sheets([], [], cfg, core.compose([], cfg), {})
+
+
+def check_rules_doc(report, core):
+    a = set(core.RULES)
+    b = set(k for k, _d in core.RULES_DOC)
+    report.ok("B", "RULES 대 RULES_DOC 키", a == b,
+              "%d 키 일치" % len(a),
+              "RULES 만: %s / RULES_DOC 만: %s"
+              % (sorted(a - b) or "-", sorted(b - a) or "-"))
+
+
+def check_moved_constants(report, core):
+    left = [n for n in MOVED_AWAY if hasattr(core, n)]
+    src = read_text("core.py")
+    textual = [n for n in MOVED_AWAY if n in src]
+    bad = sorted(set(left) | set(textual))
+    report.ok("B", "옛 모듈 상수 잔존", not bad,
+              "%d 개 전부 CONST/RULES 로 이동 완료" % len(MOVED_AWAY),
+              "core.py 에 남아 있음: " + ", ".join(bad))
+
+
+def check_rules_exposed(report, core, glue, sheets):
+    """RULES 가 화면(js_docs)과 05_실행설정 시트에 실제로 노출되는지."""
+    keys = [k for k, _d in core.RULES_DOC]
+
+    doc_ok, doc_note = False, "GLUE 의 js_docs 를 읽지 못했습니다"
+    if glue:
+        fn = find_function(ast.parse(glue), "js_docs")
+        if fn is not None:
+            d = _returned_dict(fn.body[-1].value) if isinstance(fn.body[-1], ast.Return) else None
+            got = set(_dict_literal_keys(d)) if d is not None else set()
+            hit = sorted(k for k in got if "rule" in k.lower())
+            doc_ok = bool(hit)
+            doc_note = ("js_docs 키 " + ", ".join(hit)) if hit else \
+                       "js_docs 반환에 RULES 관련 키가 없습니다"
+    report.ok("B", "js_docs 가 RULES 를 내보내는가", doc_ok, doc_note, doc_note)
+
+    rows = []
+    for sh in sheets:
+        if str(sh.get("title", "")).startswith("05"):
+            rows = sh.get("rows") or []
+            break
+    listed = [r[1] for r in rows if len(r) > 1 and "알고리즘" in str(r[0])]
+    gone = [k for k in keys if k not in listed]
+    report.ok("B", "05_실행설정 에 RULES 행", rows and not gone,
+              "'고정 상수 (알고리즘)' 행 %d 건 · RULES %d 키 전부 기록"
+              % (len(listed), len(keys)),
+              ("05_실행설정 시트를 찾지 못했습니다" if not rows
+               else "시트에 없는 RULES 키: " + ", ".join(gone)))
+
+
 def check_cfg_doc(report, core):
     a = set(k for k, _v in core.CFG_DEFAULTS)
     b = set(core.CFG_DOC)
@@ -1100,6 +1162,10 @@ def main():
               check_readconfig_covers_design, report, js, core)
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "RULES 대 RULES_DOC 키", check_rules_doc, report, core)
+        guard(report, "B", "옛 모듈 상수 잔존", check_moved_constants, report, core)
+        guard(report, "B", "RULES 노출", check_rules_exposed,
+              report, core, glue, sheets_for_check(core, reg_out))
 
         guard(report, "C", "index.html 6nt 이상 ACGT 리터럴",
               check_no_sequence, report, html)
