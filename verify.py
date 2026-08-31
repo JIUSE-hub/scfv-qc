@@ -61,16 +61,17 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.4"
+VERIFY_VERSION = "1.5"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
 HTML_FILE = "index.html"
 TESTDATA = "testdata"
 
-# --- [B] 이슈 3 이 아직 열려 있는 동안 허용되는 DESIGN_DOC 누락 -----------------
-# 이슈 3 을 해결하면 이 집합을 비워야 하고, 그러면 검사도 0 건을 요구하게 됩니다.
-KNOWN_DESIGN_DOC_GAP = {"rna_bone_marrow", "rna_peripheral"}
+# --- [B] DESIGN_DOC 누락 허용 목록 --------------------------------------------
+# 이슈 3 해결로 비었습니다. DESIGN_DEFAULTS 와 DESIGN_DOC 의 키는 이제 완전히
+# 일치해야 하며, 하나라도 어긋나면 실패합니다.
+KNOWN_DESIGN_DOC_GAP = set()
 
 # --- [C] 서열이 아니라 문자 클래스이므로 제외 --------------------------------
 MARKSEQ_REGEX = r"/\b[ACGT]{8,}\b/g"
@@ -805,9 +806,11 @@ def check_design_doc(report, core):
         detail = "DESIGN_DOC 에 없는 새 키 %d 건: %s" % (len(new), ", ".join(new))
     elif extra:
         detail = "DESIGN_DEFAULTS 에 없는데 DOC 에만 있음: " + ", ".join(extra)
-    else:
+    elif gap:
         detail = "DEFAULTS %d · DOC %d · 알려진 누락 %d 건 (%s)" % (
-            len(a), len(b), len(gap), ", ".join(gap) + " ← 이슈 3" if gap else "없음")
+            len(a), len(b), len(gap), ", ".join(gap))
+    else:
+        detail = "%d 키 일치" % len(a)
     report.add("B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", PASS if known else FAIL, detail)
 
 
@@ -826,6 +829,26 @@ def check_no_sequence(report, html):
     report.ok("C", "index.html 6nt 이상 ACGT 리터럴", not hits,
               "0 건 (markSeq 정규식은 문자 클래스이므로 제외)",
               "발견: " + " / ".join(hits[:4]))
+
+
+def _html_variants(text):
+    """index.html 이 · 나 — 를 엔티티로 써도 잡히도록 표기 변형을 만든다."""
+    ent = text.replace("·", "&middot;").replace("—", "&mdash;")
+    return {text, ent}
+
+
+def check_no_label_leak(report, html, core):
+    """설정 라벨은 전부 core.py 에서 읽어야 한다. index.html 에 리터럴로 있으면 실패."""
+    labels = [("DESIGN_DOC", lab) for _k, lab, _m in core.DESIGN_DOC]
+    labels += [("CFG_DOC", core.CFG_DOC[k][0]) for k in core.THRESH_KEYS]
+    hits = []
+    for src, lab in labels:
+        if lab and any(v in html for v in _html_variants(lab)):
+            hits.append("%s '%s'" % (src, lab))
+    report.ok("C", "설정 라벨이 index.html 에 등장", not hits,
+              "DESIGN_DOC %d + CFG_DOC %d 라벨 전부 미등장"
+              % (len(core.DESIGN_DOC), len(core.THRESH_KEYS)),
+              "index.html 에 하드코딩됨: " + ", ".join(hits))
 
 
 def check_no_const_leak(report, html, core):
@@ -1224,6 +1247,8 @@ def main():
               check_no_sequence, report, html)
         guard(report, "C", "CONST 서열이 index.html 에 등장",
               check_no_const_leak, report, html, core)
+        guard(report, "C", "설정 라벨이 index.html 에 등장",
+              check_no_label_leak, report, html, core)
 
         guard(report, "D", "회귀", check_regression,
               report, reg_out, reg_note, reg_status)

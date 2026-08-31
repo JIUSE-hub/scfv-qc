@@ -431,15 +431,17 @@ function buildDesignForm(){
   const fld = (k, inner) =>
     '<div class="fld"><label>' + esc(byKey[k].label) + "</label>" + inner +
     '<span class="desc">' + esc(byKey[k].desc) + "</span></div>";
+  // 라벨과 기본값은 전부 core.py 의 DESIGN_DOC / DESIGN_DEFAULTS 에서 온다.
+  const chk = (k, gap, withDesc) =>
+    '<div class="chk" style="margin-top:' + gap + 'px">' +
+    '<input type="checkbox" id="dz_' + k + '"' + (byKey[k].default ? " checked" : "") +
+    '><label for="dz_' + k + '">' + esc(byKey[k].label) +
+    (withDesc ? " &mdash; " + esc(byKey[k].desc) : "") + "</label></div>";
 
   let h = '<div class="grp"><h3>Fragment PCR 구성</h3><div class="grid">';
   ["f1_for_mode","f1_rev_mode","f2_for_mode","f2_rev_mode","f3_for_mode","f3_rev_mode"]
     .forEach(k => h += fld(k, segHTML(k, DOC.poolOpts, byKey[k].default)));
-  h += "</div>" +
-    '<div class="chk" style="margin-top:12px"><input type="checkbox" id="dz_f3_product_pooled"' +
-    (byKey["f3_product_pooled"].default ? " checked" : "") +
-    '><label for="dz_f3_product_pooled">' + esc(byKey["f3_product_pooled"].label) +
-    " &mdash; " + esc(byKey["f3_product_pooled"].desc) + "</label></div></div>";
+  h += "</div>" + chk("f3_product_pooled", 12, true) + "</div>";
 
   h += '<div class="grp"><h3>이번 배치</h3>' +
     '<div class="note">파일명에서 자동 추정합니다. 다르면 바꾸세요. ' +
@@ -453,11 +455,8 @@ function buildDesignForm(){
     h += fld(k, '<select id="dz_' + k + '">' + DOC.cdnaOpts.map(o =>
       '<option' + (o === byKey[k].default ? " selected" : "") + ">" + esc(o) +
       "</option>").join("") + "</select>"));
-  h += "</div>" +
-    '<div class="chk" style="margin-top:12px"><input type="checkbox" id="dz_rna_bone_marrow" checked>' +
-    '<label for="dz_rna_bone_marrow">RNA 출처 &middot; Bone marrow</label></div>' +
-    '<div class="chk" style="margin-top:6px"><input type="checkbox" id="dz_rna_peripheral" checked>' +
-    '<label for="dz_rna_peripheral">RNA 출처 &middot; Peripheral leukocytes</label></div></div>';
+  h += "</div>" + chk("rna_bone_marrow", 12, false) +
+    chk("rna_peripheral", 6, false) + "</div>";
 
   const p = $("#pDesign"); p.innerHTML = h;
   p.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {

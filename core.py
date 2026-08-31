@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "1.1"
+CORE_VERSION = "1.2"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -196,6 +196,10 @@ DESIGN_DEFAULTS = [
 DESIGN_KEYS = [k for k, _v in DESIGN_DEFAULTS]
 DESIGN_DEFAULT_MAP = dict(DESIGN_DEFAULTS)
 
+# 05_실행설정에서는 아래 두 키를 개별 행으로 내지 않고 cfg["rna_source"] 로 합쳐
+# 한 행에 씁니다. 합친 문자열이 두 값의 네 조합을 모두 구분하므로 정보 손실이 없습니다.
+RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
+
 DESIGN_DOC = [
     ("f1_for_mode", "Fragment 1 For", "VH FR1 프라이머를 family 별로 나눠 PCR 했는지"),
     ("f1_rev_mode", "Fragment 1 Rev", "CDR3 경계 프라이머"),
@@ -209,6 +213,8 @@ DESIGN_DOC = [
     ("cdna_frag1", "Fragment 1 cDNA", "판정에 미사용. 기록용"),
     ("cdna_frag2", "Fragment 2 cDNA", "판정에 미사용. 기록용"),
     ("cdna_frag3", "Fragment 3 cDNA", "판정에 미사용. 기록용"),
+    ("rna_bone_marrow", "RNA 출처 · Bone marrow", "판정에 미사용. 기록용"),
+    ("rna_peripheral", "RNA 출처 · Peripheral leukocytes", "판정에 미사용. 기록용"),
 ]
 
 
@@ -1539,9 +1545,11 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
            "%d 종" % meta.get("primer_n", 0)],
           ["실행", "입력 파일", ", ".join(meta.get("files", [])), "", "", ""]]
     for k, lab, memo in DESIGN_DOC:
+        if k in RNA_KEYS:
+            continue          # 아래 "RNA 출처" 한 행이 두 값을 합쳐 보여준다
         r5.append(["실험 설계", lab, cfg[k], "", "", memo])
     r5.append(["실험 설계", "RNA 출처", cfg["rna_source"] or "(미지정)", "", "",
-               "판정에 미사용. 기록용"])
+               "판정에 미사용. 기록용. 선택한 RNA 출처를 합친 값"])
     for k in THRESH_KEYS:
         r5.append(["판정 임계값", CFG_DOC[k][0], cfg[k], CFG_DEFAULT_MAP[k],
                    "O" if cfg[k] == CFG_DEFAULT_MAP[k] else "X  <-- 변경됨",
