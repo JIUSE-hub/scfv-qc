@@ -685,6 +685,7 @@ function renderResults(){
   const nPass = R.filter(r => String(r[H.indexOf("최종판정")]).startsWith("PASS")).length;
   $("#resHint").innerHTML = "통과 <b>" + nPass + "</b> / " + R.length +
     " &nbsp;·&nbsp; param_hash <code>" + esc(OUT.config.param_hash) + "</code>" +
+    " &nbsp;·&nbsp; design_hash <code>" + esc(OUT.config.design_hash) + "</code>" +
     (OUT.config.nondefault.length
       ? ' &nbsp;·&nbsp; <span style="color:var(--warn)">비표준 임계값 ' +
         OUT.config.nondefault.length + " 건</span>" : "");

@@ -61,7 +61,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.5"
+VERIFY_VERSION = "1.6"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -79,6 +79,7 @@ MARKSEQ_REGEX = r"/\b[ACGT]{8,}\b/g"
 # --- [D] 기대값 --------------------------------------------------------------
 EXPECT = {
     "param_hash": "3473927a",
+    "design_hash": "be9b0573",
     "clones": [
         {"id": "c01", "verdict": "NO_LINKER",  "insert": 276, "mix": 2.5},
         {"id": "c02", "verdict": "PASS",       "insert": 728, "d1": 366, "d2": 309, "mix": 2.1},
@@ -737,6 +738,15 @@ def sheets_for_check(core, reg_out):
     return core.build_sheets([], [], cfg, core.compose([], cfg), {})
 
 
+def check_judgment_design_keys(report, core):
+    """design_hash 대상 키가 실제로 존재하는 설계 키인지. 유령 키를 막는다."""
+    keys = list(core.JUDGMENT_DESIGN_KEYS)
+    ghost = [k for k in keys if k not in core.DESIGN_KEYS]
+    report.ok("B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재", not ghost,
+              "%d 키 전부 존재 (%s)" % (len(keys), ", ".join(keys)),
+              "DESIGN_DEFAULTS 에 없는 키: " + ", ".join(ghost))
+
+
 def check_rules_doc(report, core):
     a = set(core.RULES)
     b = set(k for k, _d in core.RULES_DOC)
@@ -756,9 +766,11 @@ def check_moved_constants(report, core):
               "core.py 에 남아 있음: " + ", ".join(bad))
 
 
-def check_rules_exposed(report, core, glue, sheets):
+def check_rules_exposed(report, core, glue, reg_out):
     """RULES 가 화면(js_docs)과 05_실행설정 시트에 실제로 노출되는지."""
     keys = [k for k, _d in core.RULES_DOC]
+    # 시트 조립은 guard 안에서 해야 core.py 가 깨졌을 때도 표를 끝까지 낸다.
+    sheets = sheets_for_check(core, reg_out)
 
     doc_ok, doc_note = False, "GLUE 의 js_docs 를 읽지 못했습니다"
     if glue:
@@ -897,7 +909,7 @@ def norm_cell(v):
     return str(v)
 
 
-D_NAMES = ["param_hash", "클론별 판정·길이", "클론별 혼합(%)", "CDR3-H3 중앙값",
+D_NAMES = ["param_hash", "design_hash", "클론별 판정·길이", "클론별 혼합(%)", "CDR3-H3 중앙값",
            "조성 VL 순서", "조성 JH 순서", "fasta 통과 클론 수",
            "xlsx 바이트 재현성", "xlsx openpyxl 재검증"]
 
@@ -930,9 +942,10 @@ def check_regression(report, out, note, status):
 
     import xlsx_writer
 
-    report.ok("D", "param_hash", out["config"]["param_hash"] == EXPECT["param_hash"],
-              EXPECT["param_hash"],
-              "기대 %s 실제 %s" % (EXPECT["param_hash"], out["config"]["param_hash"]))
+    for name in ("param_hash", "design_hash"):
+        got = out["config"].get(name)
+        report.ok("D", name, got == EXPECT[name], EXPECT[name],
+                  "기대 %s 실제 %s" % (EXPECT[name], got))
 
     qc = dict((q["id"], q) for q in out["qc"])
     bad = []
@@ -1238,10 +1251,12 @@ def main():
               check_readconfig_covers_design, report, js, core)
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
+              check_judgment_design_keys, report, core)
         guard(report, "B", "RULES 대 RULES_DOC 키", check_rules_doc, report, core)
         guard(report, "B", "옛 모듈 상수 잔존", check_moved_constants, report, core)
         guard(report, "B", "RULES 노출", check_rules_exposed,
-              report, core, glue, sheets_for_check(core, reg_out))
+              report, core, glue, reg_out)
 
         guard(report, "C", "index.html 6nt 이상 ACGT 리터럴",
               check_no_sequence, report, html)

@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "1.2"
+CORE_VERSION = "1.3"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -199,6 +199,14 @@ DESIGN_DEFAULT_MAP = dict(DESIGN_DEFAULTS)
 # 05_실행설정에서는 아래 두 키를 개별 행으로 내지 않고 cfg["rna_source"] 로 합쳐
 # 한 행에 씁니다. 합친 문자열이 두 값의 네 조합을 모두 구분하므로 정보 손실이 없습니다.
 RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
+
+# 설계 항목 중 판정 분기를 실제로 만드는 것만 모읍니다. design_hash 의 대상입니다.
+#   batch_vh_family / batch_chain : call_one 에서 WRONG_FAMILY / WRONG_CHAIN 을 만든다
+#   f1_for_mode / f2_for_mode     : 둘 다 "분리" 일 때만 CDR3 경계 정합성 검사를 돌린다
+# 나머지 설계 항목(f1_rev/f2_rev/f3_* , cdna_frag1~3, rna_*)은 05_실행설정에 개별
+# 기록되지만 cfg 에서 읽혀 판정을 가르는 곳이 없어 제외합니다.
+JUDGMENT_DESIGN_KEYS = ["batch_vh_family", "batch_chain",
+                        "f1_for_mode", "f2_for_mode"]
 
 DESIGN_DOC = [
     ("f1_for_mode", "Fragment 1 For", "VH FR1 프라이머를 family 별로 나눠 PCR 했는지"),
@@ -553,6 +561,12 @@ def build_config(overrides=None, batches=None):
     cfg["nondefault"] = [k for k in THRESH_KEYS if cfg[k] != CFG_DEFAULT_MAP[k]]
     cfg["param_hash"] = hashlib.md5(
         json.dumps({k: cfg[k] for k in THRESH_KEYS}, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:8]
+    # 판정 임계값과 성격이 달라 param_hash 에 합치지 않고 따로 둡니다.
+    # 임계값은 배치 간에 같아야 하고, 설계는 배치마다 달라야 정상입니다.
+    cfg["design_hash"] = hashlib.md5(
+        json.dumps({k: cfg[k] for k in JUDGMENT_DESIGN_KEYS},
+                   sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
 
     err = []
@@ -1361,7 +1375,15 @@ def glossary():
 
         ["재현성", "param_hash",
          "판정 임계값 16 개를 정렬해 만든 지문. 두 배치의 결과를 비교하려면 이 값이 같아야 합니다. "
-         "실험 설계와 cDNA / RNA 출처는 해시에 포함되지 않고 05_실행설정 시트에 개별 기록됩니다."],
+         "실험 설계와 cDNA / RNA 출처는 해시에 포함되지 않고 05_실행설정 시트에 개별 기록됩니다. "
+         "설계 파라미터는 design_hash 로 따로 관리합니다."],
+        ["재현성", "design_hash",
+         "판정에 직접 관여하는 실험 설계 %d 개의 지문. batch_vh_family 와 batch_chain 은 "
+         "WRONG_FAMILY / WRONG_CHAIN 플래그를, f1_for_mode 와 f2_for_mode 는 CDR3 경계 "
+         "정합성 검사의 수행 여부를 결정한다. 임계값은 배치 간에 같아야 하고 설계는 "
+         "배치마다 달라야 정상이므로 param_hash 와 분리해 둔다. 두 배치를 비교할 때 "
+         "param_hash 는 같아야 하고, design_hash 가 다르면 무엇이 다른지 05_실행설정에서 "
+         "확인해야 한다." % len(JUDGMENT_DESIGN_KEYS)],
         ["재현성", "기본값과 동일",
          "05_실행설정 시트의 열. X 로 표시된 항목은 기본값에서 바뀐 것이며 판정 결과에 직접 영향을 줍니다."],
     ]
@@ -1541,6 +1563,10 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
           ["실행", "실행 시각", meta.get("timestamp", ""), "", "", ""],
           ["실행", "param_hash", cfg["param_hash"], "", "",
            "판정 임계값 16개의 지문. 배치 간 비교 시 이 값이 같아야 동일 기준"],
+          ["실행", "design_hash", cfg["design_hash"], "", "",
+           "판정에 관여하는 설계 %d 개(배치 VH family·경쇄, fragment 1·2 For 구성)의 "
+           "지문. param_hash 가 같아도 이 값이 다르면 서로 다른 기준으로 판정된 것"
+           % len(JUDGMENT_DESIGN_KEYS)],
           ["실행", "프라이머 FASTA", meta.get("primer_file", ""), "", "",
            "%d 종" % meta.get("primer_n", 0)],
           ["실행", "입력 파일", ", ".join(meta.get("files", [])), "", "", ""]]
