@@ -33,7 +33,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.2"
+VERIFY_VERSION = "1.3"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -986,18 +986,23 @@ UNIT_ALIEN = ("ATTC" * 12)[:45]     # 랜드마크 자리에 넣을 무관한 45
 UNIT_SUB2 = (6, 22)                 # 치환 위치 — 허용치(lm_max_sub) 이내
 UNIT_SUB3 = (6, 22, 38)             # 치환 위치 — 허용치 초과
 UNIT_DEL_AT = 12                    # 결실 시작 위치 (동종중합 구간 밖)
+# 5' G-run 경계. 여기서 2 nt 를 지우면 갭 1 개와 치환 2 개가 박빙이라
+# AL_GAP 이 -3 이 되면 S2G1/WARN 으로 내려앉는다. AL_GAP 회귀 감지용.
+# 같은 위치라도 n=1 / n=3 은 격차가 커서 갈리지 않으므로 n=2 만 쓴다.
+UNIT_DEL_TIGHT = 3
 _TRANSITION = {"A": "G", "G": "A", "C": "T", "T": "C"}
 
-#        태그   설명                    변형종류  인자        기대 status  기대 level
+#        태그   설명                      변형종류  인자                기대 status  기대 level
 UNIT_CASES = [
-    ("E1", "변형 없음",             "sub",   (),        "OK",     "OK"),
-    ("E2", "치환 2 개 (허용 이내)", "sub",   UNIT_SUB2, "OK",     "OK"),
-    ("E3", "치환 3 개 (허용 초과)", "sub",   UNIT_SUB3, "S3G0",   "WARN"),
-    ("E4", "1 nt 결실",             "del",   1,         "S0G1",   "WARN"),
-    ("E5", "2 nt 결실",             "del",   2,         "GAP2",   "FAIL"),
-    ("E6", "3 nt 결실",             "del",   3,         "GAP3",   "FAIL"),
-    ("E7", "무관한 서열",           "alien", None,      "ABSENT", "FAIL"),
-    ("E8", "covered=False",         "na",    None,      "NA",     "NA"),
+    ("E1", "변형 없음",             "sub",   (),                    "OK",     "OK"),
+    ("E2", "치환 2 개 (허용 이내)", "sub",   UNIT_SUB2,             "OK",     "OK"),
+    ("E3", "치환 3 개 (허용 초과)", "sub",   UNIT_SUB3,             "S3G0",   "WARN"),
+    ("E4", "1 nt 결실",             "del",   (UNIT_DEL_AT, 1),      "S0G1",   "WARN"),
+    ("E5", "2 nt 결실",             "del",   (UNIT_DEL_AT, 2),      "GAP2",   "FAIL"),
+    ("E6", "3 nt 결실",             "del",   (UNIT_DEL_AT, 3),      "GAP3",   "FAIL"),
+    ("E7", "무관한 서열",           "alien", None,                  "ABSENT", "FAIL"),
+    ("E8", "covered=False",         "na",    None,                  "NA",     "NA"),
+    ("E9", "결실 위치 3 · 2 nt 결실", "del", (UNIT_DEL_TIGHT, 2),   "GAP2",   "FAIL"),
 ]
 
 
@@ -1008,7 +1013,8 @@ def mutate_landmark(lm, kind, arg):
             b[p] = _TRANSITION[b[p]]
         return "".join(b)
     if kind == "del":
-        return lm[:UNIT_DEL_AT] + lm[UNIT_DEL_AT + arg:]
+        pos, n = arg
+        return lm[:pos] + lm[pos + n:]
     if kind == "alien":
         return UNIT_ALIEN
     return lm
