@@ -63,7 +63,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.1"
+VERIFY_VERSION = "2.2"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1328,23 +1328,29 @@ def check_stuffer_units(report, core):
 # 실측 대조군으로는 두 분기 정도만 실행됩니다. 나머지는 합성 read 로 덮습니다.
 # (변형종류, 인자, 기대 verdict)
 NEG_CASES = [
-    ("N1", "스터퍼 서열 검출",        "stuffer",  None, "PARENTAL"),
-    ("N2", "인서트가 스터퍼 길이",     "len386",   None, "PARENTAL?"),
-    ("N3", "완전한 scFv 가 들어감",    "scfv",     None, "CONTAMINATED"),
-    ("N4", "인서트 있으나 링커 없음",  "nolink",   None, "CARRYOVER"),
-    ("N5", "AscI 미검출",             "noascI",   None, "EMPTY_VECTOR"),
-    ("N6", "NotI 2 회",               "concat",   None, "CONCATEMER"),
-    ("N7", "트레이스 혼합",           "mixed",    None, "MIXED"),
-    ("N8", "어느 분류에도 안 맞음",    "check",    None, "CHECK"),
+    ("N1", "스터퍼 서열 검출",           "stuffer", "PARENTAL"),
+    ("N2", "인서트가 스터퍼 길이",        "len386",  "PARENTAL?"),
+    ("N3", "링커 O · 범위 내 · 프레임 정상", "scfv",  "CONTAMINATED"),
+    ("N4", "인서트 있으나 링커 없음",     "nolink",  "CARRYOVER"),
+    ("N5", "AscI 미검출",                "noascI",  "EMPTY_VECTOR"),
+    ("N6", "NotI 2 회",                  "concat",  "CONCATEMER"),
+    ("N7", "트레이스 혼합",              "mixed",   "MIXED"),
+    ("N8", "어느 분류에도 안 맞음",       "check",   "CHECK"),
+    ("N9", "링커 O · 범위 내 · 프레임 이상", "offframe", "CONTAMINATED?"),
+    ("N10", "링커 O · 인서트 하한 미만",   "partial", "PARTIAL_INSERT"),
 ]
 
 
-def synth_neg_read(core, kind):
-    """대조군 분기용 합성 read. 이슈 6 의 합성 read 방식을 그대로 씁니다."""
+def synth_neg_read(core, cfg, kind):
+    """대조군 분기용 합성 read. 이슈 6 의 합성 read 방식을 그대로 씁니다.
+
+    입력 길이는 cfg 에서 계산합니다(기대값이 아니라 입력이므로 연동해도 됩니다).
+    기대 verdict 는 NEG_CASES 에 문자열로 고정되어 있습니다.
+    """
     C = core.CONST
     q1off = C["QC1"].find(C["NotI"])
     span = len(C["QC1"]) - q1off + len(C["AscI"])
-    fill = UNIT_FILL * 400
+    fill = UNIT_FILL * 500
 
     def build(mid, tail=True, extra=""):
         seq = (C["PELB_ATG"] + "GGG" + C["QC1"] + mid +
@@ -1353,45 +1359,51 @@ def synth_neg_read(core, kind):
                 "filename": "syn.ab1", "raw_len": len(seq), "raw_seq": seq,
                 "raw_qual": [], "trace": {}, "ploc": []}
 
-    if kind == "stuffer":                      # 스터퍼 + 길이 386
-        n = C["STUFFER_INSERT_BP"] - span
-        return build((C["STUFFER"] + fill)[:n])
-    if kind == "len386":                       # 길이만 386, 스터퍼 없음
+    def with_linker(want_ins):
+        """링커를 품고 인서트 길이가 want_ins 가 되는 mid."""
+        n = want_ins - span - len(C["QC2"])
+        half = n // 2
+        return build(fill[:half] + C["QC2"] + fill[:n - half])
+
+    if kind == "stuffer":                      # 스터퍼 + 스터퍼 길이
+        return build((C["STUFFER"] + fill)[:C["STUFFER_INSERT_BP"] - span])
+    if kind == "len386":                       # 길이만 스터퍼와 같고 서열 없음
         return build(fill[:C["STUFFER_INSERT_BP"] - span])
-    if kind == "scfv":                         # 링커 + 프레임 정상 + 범위 내
-        for n in range(300, 900):
-            ins = span + n + len(C["QC2"])
-            if ins % 3 == C["FRAME_MOD"] and 700 <= ins <= 800:
-                half = n // 2
-                return build(fill[:half] + C["QC2"] + fill[:n - half])
-        return build(fill[:700])
+    if kind in ("scfv", "offframe"):
+        want_frame = (kind == "scfv")
+        for ins in range(cfg["insert_min"], cfg["insert_max"] + 1):
+            if (ins % 3 == C["FRAME_MOD"]) == want_frame:
+                return with_linker(ins)
+    if kind == "partial":                      # 링커 O · 하한 미만
+        return with_linker(cfg["insert_min"] - 200)
     if kind == "nolink":                       # 인서트 있고 링커 없음
         return build(fill[:200])
     if kind == "noascI":                       # AscI 없음
         return build(fill[:200], tail=False)
     if kind == "concat":                       # NotI 2 회
         return build(fill[:200], extra=C["NotI"])
-    if kind == "check":                        # 링커 있는데 프레임/범위가 안 맞음
-        return build(fill[:100] + C["QC2"] + fill[:100])
+    if kind == "check":                        # 링커 있고 인서트가 상한 초과
+        return with_linker(cfg["insert_max"] + 120)
     return build(fill[:200])
 
 
 def check_negctrl_units(report, core):
     cfg = core.build_config({"analysis_mode": core.MODE_NEGCTRL}, [])
-    for tag, label, kind, _arg, want in NEG_CASES:
-        read = synth_neg_read(core, kind)
+    for tag, label, kind, want in NEG_CASES:
         if kind == "mixed":
             # 트레이스가 없으면 mix_pct 가 None 이라 이 분기에 닿지 않습니다.
-            r = core.qc_one(synth_neg_read(core, "nolink"), cfg)
-            r = dict(r)
+            r = dict(core.qc_one(synth_neg_read(core, cfg, "nolink"), cfg))
             r["mix_pct"] = cfg["mix_pct"] + 1.0
-            got, why = core.negctrl_verdict(r, cfg)
         else:
-            r = core.qc_one(read, cfg)
-            got, why = core.negctrl_verdict(r, cfg)
-        report.ok("E", "%s %s" % (tag, label), got == want,
-                  "%s · %s" % (want, why[:34]),
-                  "기대 %s 실제 %s (%s)" % (want, got, why))
+            r = core.qc_one(synth_neg_read(core, cfg, kind), cfg)
+        got, why = core.negctrl_verdict(r, cfg)
+        # 모든 reason 에 인서트 길이와 프레임이 들어가야 합니다.
+        has_facts = "인서트 " in why and "프레임" in why
+        report.ok("E", "%s %s" % (tag, label), got == want and has_facts,
+                  "%s · %s" % (want, why[:30]),
+                  "기대 %s 실제 %s%s (%s)"
+                  % (want, got, "" if has_facts else " · reason 에 인서트/프레임 없음",
+                     why))
 
 
 # --- index.html 의 badge() 가 아래 표시값을 모두 처리하는가 --------------------

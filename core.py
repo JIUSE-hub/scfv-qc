@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.2"
+CORE_VERSION = "2.3"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -1416,6 +1416,15 @@ def glossary():
          "들어갔다. 음성 대조군에는 인서트를 넣지 않았으므로 ligation 단계에서 "
          "인서트가 섞여 들어갔다는 뜻이다. 대조군 판정 중 가장 심각하며, 같은 "
          "반응에서 나온 본 실험 결과 전체의 신뢰도에 영향을 준다."],
+        ["대조군 판정", "CONTAMINATED?",
+         "링커 검출 + 인서트가 설정 범위 내인데 프레임만 밀린 경우. 물음표는 오염 "
+         "여부가 아니라 프레임 이상을 가리킨다. 대조군에서 이것은 '오염이 아니다' 가 "
+         "아니라 '오염된 인서트에 프레임 문제도 있다' 는 뜻이므로 CONTAMINATED 와 "
+         "같은 등급으로 다룬다. 프레임 정상만 오염으로 보면 오염 신호를 놓친다."],
+        ["대조군 판정", "PARTIAL_INSERT",
+         "링커는 검출되는데 인서트가 길이 하한 미만인 경우. VL 쪽이 잘린 부분 조립 "
+         "산물이다. scFv 유래 물질이 들어간 것은 맞지만 완전한 scFv 는 아니므로 "
+         "CONTAMINATED 계열과 구분한다. 길이는 06_서열에서 직접 확인한다."],
         ["대조군 판정", "CARRYOVER",
          "인서트는 있으나 링커 미검출. scFv 가 아닌 무언가가 들어간 것이다. "
          "CONTAMINATED 가 ligation 단계에서 인서트가 섞인 것이라면, 이쪽은 벡터 "
@@ -1714,16 +1723,20 @@ def insert_seq(r):
 # CHECK 로 남깁니다.
 NEGCTRL_VERDICTS = [
     "CONCATEMER", "MIXED", "EMPTY_VECTOR", "PARENTAL", "PARENTAL?",
-    "CONTAMINATED", "CARRYOVER", "CHECK",
+    "CONTAMINATED", "CONTAMINATED?", "PARTIAL_INSERT", "CARRYOVER", "CHECK",
 ]
 
 # 화면 색 구분에만 쓰는 등급입니다. verdict 선택 우선순위는 negctrl_verdict 의
 # 판정 순서로 고정되어 있고 이 등급을 쓰지 않습니다. FLAG_SEV 도 쓰지 않습니다.
+# 빨강은 "scFv 크기의 인서트가 링커까지 갖춘 채 들어감" 에만 씁니다.
+# CONTAMINATED? 의 물음표는 오염 여부가 아니라 프레임 이상을 가리킵니다.
 NEGCTRL_LEVEL = {
     "CONTAMINATED": "fail",     # 완전한 scFv 가 들어감
+    "CONTAMINATED?": "fail",    # scFv 가 들어갔고 프레임까지 밀림
     "EMPTY_VECTOR": "none",     # 대조군에서 기대되는 배경
     "CONCATEMER": "check", "MIXED": "check", "PARENTAL": "check",
-    "PARENTAL?": "check", "CARRYOVER": "check", "CHECK": "check",
+    "PARENTAL?": "check", "PARTIAL_INSERT": "check",
+    "CARRYOVER": "check", "CHECK": "check",
 }
 
 
@@ -1738,6 +1751,10 @@ def _neg_facts(r):
         "link": "링커 " + ("검출" if r["pos_link"] >= 0 else "미검출"),
         "ins": "인서트 " + ("%d bp" % ins if ins is not None else "계산 불가"),
         "stuf": "스터퍼 " + ("검출" if r["stuffer"] else "미검출"),
+        # 프레임 값과 인서트 길이는 모든 reason 에 들어갑니다. 분류가 틀렸을 때
+        # 근거만 보고도 알아챌 수 있어야 하기 때문입니다.
+        "frame": ("프레임 %%3=%d (유지 조건 %d)" % (ins % 3, CONST["FRAME_MOD"])
+                  if ins is not None else "프레임 판단 불가"),
     }
 
 
@@ -1745,27 +1762,35 @@ def negctrl_verdict(r, cfg):
     """대조군 클론 하나를 (verdict, reason) 으로 읽는다. 위에서부터 먼저 맞는 것."""
     f = _neg_facts(r)
     ins = r["insert_bp"]
+    tail = [f["ins"], f["frame"]]
+
+    def out(v, *head):
+        return v, " · ".join(list(head) + tail)
+
     if max(r["n_notI"], r["n_ascI"], r["n_link"]) > 1:
-        return "CONCATEMER", ("NotI %d / AscI %d / 링커 %d 회 검출 (각 1 회여야 함)"
-                              % (r["n_notI"], r["n_ascI"], r["n_link"]))
+        return out("CONCATEMER", "NotI %d / AscI %d / 링커 %d 회 검출 (각 1 회여야 함)"
+                   % (r["n_notI"], r["n_ascI"], r["n_link"]))
     if r["mix_pct"] is not None and r["mix_pct"] > cfg["mix_pct"]:
-        return "MIXED", ("2순위 피크 초과 위치 %.1f%% (임계 %.1f%%)"
-                         % (r["mix_pct"], cfg["mix_pct"]))
+        return out("MIXED", "2순위 피크 초과 위치 %.1f%% (임계 %.1f%%)"
+                   % (r["mix_pct"], cfg["mix_pct"]))
     if r["pos_notI"] < 0 or r["pos_ascI"] < 0:
-        return "EMPTY_VECTOR", " · ".join([f["notI"], f["ascI"], f["link"]])
+        return out("EMPTY_VECTOR", f["notI"], f["ascI"], f["link"])
     if r["stuffer"]:
-        return "PARENTAL", " · ".join(["스터퍼 서열 검출", f["ins"]])
+        return out("PARENTAL", "스터퍼 서열 검출")
     if ins is not None and ins == CONST["STUFFER_INSERT_BP"]:
-        return "PARENTAL?", " · ".join([f["ins"] + " (스터퍼 길이와 동일)", f["stuf"]])
-    if (r["pos_link"] >= 0 and ins is not None
-            and ins % 3 == CONST["FRAME_MOD"]
-            and cfg["insert_min"] <= ins <= cfg["insert_max"]):
-        return "CONTAMINATED", " · ".join(
-            [f["link"], f["ins"] + " (범위 %d~%d)" % (cfg["insert_min"], cfg["insert_max"]),
-             "프레임 정상"])
+        return out("PARENTAL?", "인서트 길이가 스터퍼 보유 클론과 동일", f["stuf"])
+    if r["pos_link"] >= 0 and ins is not None:
+        rng = "범위 %d~%d" % (cfg["insert_min"], cfg["insert_max"])
+        if cfg["insert_min"] <= ins <= cfg["insert_max"]:
+            if ins % 3 == CONST["FRAME_MOD"]:
+                return out("CONTAMINATED", f["link"], rng + " 내", "프레임 정상")
+            return out("CONTAMINATED?", f["link"], rng + " 내", "프레임 이상")
+        if ins < cfg["insert_min"]:
+            return out("PARTIAL_INSERT", f["link"],
+                       "인서트가 하한 %d bp 미만" % cfg["insert_min"])
     if ins is not None and r["pos_link"] < 0:
-        return "CARRYOVER", " · ".join([f["link"], f["ins"], f["stuf"]])
-    return "CHECK", " · ".join([f["notI"], f["ascI"], f["link"], f["ins"], f["stuf"]])
+        return out("CARRYOVER", f["link"], f["stuf"])
+    return out("CHECK", f["notI"], f["ascI"], f["link"], f["stuf"])
 
 
 def insert_md5(r):
