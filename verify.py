@@ -64,7 +64,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.4"
+VERIFY_VERSION = "2.5"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -812,22 +812,28 @@ def flags_appended_in(fn):
 
 
 def check_flag_sev_keys(report, core, core_tree):
-    """FLAG_SEV 의 키와 qc_one 이 실제로 붙이는 플래그가 양방향으로 맞는가.
+    """FLAG_SEV 의 키와 실제로 붙는 플래그가 맞는가.
 
-    FLAG_SEV 에만 있으면 아무 데도 안 붙는 유령 플래그이고, qc_one 에만 있으면
-    심각도 0 으로 취급되어 절대 verdict 가 되지 못합니다. 둘 다 조용한 결함입니다.
+    두 방향의 뜻이 다릅니다.
+      FLAG_SEV 에만 있음  : 아무 데도 안 붙는 유령 플래그 (오타·삭제 잔재)
+      qc_one 에만 있음    : 심각도 0 이라 절대 verdict 가 되지 못함
+    call_one 이 붙이는 프라이머 플래그는 verdict 선택을 거치지 않으므로
+    FLAG_SEV 에 있어도 없어도 됩니다. 다만 FLAG_SEV 에 있다면 실제로 붙기는
+    해야 하므로 유령 검사에는 포함합니다.
     """
-    fn = find_function(core_tree, "qc_one")
-    if fn is None:
-        report.add("B", "FLAG_SEV 대 qc_one 의 실제 플래그", FAIL,
-                   "core.py 에서 qc_one 을 찾지 못했습니다")
+    fns = [find_function(core_tree, n) for n in ("qc_one", "call_one")]
+    if fns[0] is None or fns[1] is None:
+        report.add("B", "FLAG_SEV 대 실제 플래그", FAIL,
+                   "core.py 에서 qc_one / call_one 을 찾지 못했습니다")
         return
-    used = flags_appended_in(fn)
+    qc_used = flags_appended_in(fns[0])
+    all_used = qc_used | flags_appended_in(fns[1])
     sev = set(core.RULES["FLAG_SEV"])
-    ghost = sorted(sev - used)
-    orphan = sorted(used - sev)
-    report.ok("B", "FLAG_SEV 대 qc_one 의 실제 플래그", not ghost and not orphan,
-              "%d 개 양방향 일치" % len(sev),
+    ghost = sorted(sev - all_used)
+    orphan = sorted(qc_used - sev)
+    report.ok("B", "FLAG_SEV 대 실제 플래그", not ghost and not orphan,
+              "%d 개 · qc_one %d 개 전부 심각도 있음 · 유령 0"
+              % (len(sev), len(qc_used)),
               "FLAG_SEV 에만 있음(유령): %s / qc_one 에만 있음(심각도 0): %s"
               % (", ".join(ghost) or "-", ", ".join(orphan) or "-"))
 
@@ -891,6 +897,23 @@ def check_ambiguity_runtime(report, core):
     report.ok("B", "모호성 항목이 런타임 계산인가", not bad,
               "프라이머 없이는 이름 0 건 · 넣으면 %d 쌍 계산" % len(pairs),
               " / ".join(bad))
+
+
+def check_ambig_family_flag(report, core, html):
+    """AMBIG_FAMILY? 가 FLAG_SEV · 06_용어설명 · badge 세 곳에 모두 있는가."""
+    flag = "AMBIG_FAMILY?"
+    bad = []
+    if flag not in core.RULES["FLAG_SEV"]:
+        bad.append("FLAG_SEV 에 없음")
+    if not any(t == flag for _c, t, _d in core.glossary()):
+        bad.append("06_용어설명에 항목 없음")
+    body = js_function_body(html, "badge")
+    cls, how = badge_class(body, flag) if body else (None, "badge() 없음")
+    if cls != "b-check":
+        bad.append("badge 에서 %s(%s)" % (cls, how))
+    report.ok("B", "AMBIG_FAMILY? 처리", not bad,
+              "FLAG_SEV 심각도 %s · 용어설명 있음 · badge b-check"
+              % core.RULES["FLAG_SEV"].get(flag), " / ".join(bad))
 
 
 def check_negctrl_vocab(report, core, html):
@@ -1445,7 +1468,8 @@ def check_negctrl_units(report, core):
 
 # --- index.html 의 badge() 가 아래 표시값을 모두 처리하는가 --------------------
 BADGE_EXPECT = [("OK", "b-pass"), ("S1G0", "b-warn"), ("GAP2", "b-fail"),
-                ("ABSENT", "b-fail"), ("NA", "b-none"), ("PARENTAL?", "b-check")]
+                ("ABSENT", "b-fail"), ("NA", "b-none"), ("PARENTAL?", "b-check"),
+                ("AMBIG_FAMILY?", "b-check")]
 
 _BADGE_RULE_RE = re.compile(
     r"^\s*if\s*\((?P<cond>.+?)\)\s*return\s*'<span class=\"badge (?P<cls>b-[a-z]+)\"")
@@ -1561,6 +1585,71 @@ def check_ambiguity_units(report, core):
               "비호환 0~%d certain · %d~%d split · %d 초과 제외 · 길이 다르면 짧은 쪽까지"
               % (tol, tol + 1, 2 * tol, 2 * tol),
               " / ".join(bad))
+
+
+def check_family_ambiguity_units(report, core):
+    """동점 판정에 모호성 근거가 붙는가, WRONG_FAMILY 와 AMBIG_FAMILY? 가 갈리는가."""
+    cfg = core.build_config({"analysis_mode": core.MODE_ASSIGNED,
+                             "batch_vh_family": "VHa"}, [])
+    C = core.CONST
+    tail = "ATTCATTCATTCATTCATTCATTC"
+
+    def prim(name, core_seq, fam):
+        # F1_For 은 NotI 를 앵커로 잡으므로 판별구간 앞에 NotI 를 둡니다.
+        seq = C["NotI"] + core_seq
+        return {"name": name, "seq": seq, "core": core_seq,
+                "core_trim": len(C["NotI"]), "len": len(seq), "group": "F1_For",
+                "chain": "heavy", "family": fam, "families": [fam],
+                "target": "", "fragment": "", "dir": "", "tm": ""}
+
+    def read_for(core_seq):
+        seq = (C["PELB_ATG"] + "GGG" + C["QC1"][:C["QC1"].find(C["NotI"])] +
+               C["NotI"] + core_seq + tail + C["QC3"] + C["QC4"] + "A" * 20)
+        return {"id": "syn", "clone": "syn", "batch": "", "date": "", "primer": "",
+                "filename": "syn.ab1", "raw_len": len(seq), "raw_seq": seq,
+                "raw_qual": [], "trace": {}, "ploc": []}
+
+    base = "ACGTACGTACGTACGTACGTAC"                 # 0 번 위치가 A
+    alt = "C" + base[1:]                             # base 와 비호환 1 곳 -> certain 쌍
+    mid = "G" + base[1:]                             # 두 프라이머 모두에서 1 씩 어긋남
+    far = list(base)
+    for i in range(8):                               # base 와 비호환 8 곳 -> 목록 밖
+        far[i * 2] = {"A": "C", "C": "A", "G": "T", "T": "G"}[far[i * 2]]
+    far = "".join(far)
+
+    def run(plist, read_core):
+        amb = core.ambiguity_context(plist, cfg)
+        r = core.qc_one(read_for(read_core), cfg)
+        return core.call_one(r, plist, cfg, amb)
+
+    bad = []
+    # (1) family 가 다른 certain 쌍이 동점 -> ambiguity 가 채워진다
+    vh = run([prim("pA", base, "VHa"), prim("pB", alt, "VHb")], mid)["vh"]
+    if not vh or len(vh["names"]) != 2:
+        bad.append("동점이 안 만들어짐 (%s)" % (vh and vh["names"]))
+    elif not vh["ambiguity"] or vh["ambiguity"][0]["tie"] != "certain":
+        bad.append("certain 동점인데 ambiguity 가 %s" % vh["ambiguity"])
+
+    # (2) family 가 같은 동점 -> ambiguity 는 비어 있어야 한다
+    vh2 = run([prim("pA", base, "VHa"), prim("pB", alt, "VHa")], mid)["vh"]
+    if not vh2 or len(vh2["names"]) != 2:
+        bad.append("(2) 동점이 안 만들어짐")
+    elif vh2["ambiguity"]:
+        bad.append("같은 family 동점인데 ambiguity 가 %s" % vh2["ambiguity"])
+
+    # (3) 배치 지정 VHa 인데 모호성 쌍으로 이어진 VHb 로 판정 -> AMBIG_FAMILY?
+    c3 = run([prim("pA", base, "VHa"), prim("pB", alt, "VHb")], alt)
+    if "AMBIG_FAMILY?" not in c3["flags"] or "WRONG_FAMILY" in c3["flags"]:
+        bad.append("모호성 있는 불일치인데 %s" % c3["flags"])
+
+    # (4) 모호성 쌍이 없는 VHc 로 판정 -> WRONG_FAMILY
+    c4 = run([prim("pA", base, "VHa"), prim("pC", far, "VHc")], far)
+    if "WRONG_FAMILY" not in c4["flags"] or "AMBIG_FAMILY?" in c4["flags"]:
+        bad.append("모호성 없는 불일치인데 %s" % c4["flags"])
+
+    report.ok("E", "family 모호성 근거", not bad,
+              "cross 동점 → ambiguity(certain) · same 동점 → 빈 목록 · "
+              "모호성 있음 → AMBIG_FAMILY? · 없음 → WRONG_FAMILY", " / ".join(bad))
 
 
 def check_badge_states(report, js):
@@ -2024,9 +2113,11 @@ def main():
         guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
         guard(report, "B", "모호성 항목이 런타임 계산인가",
               check_ambiguity_runtime, report, core)
+        guard(report, "B", "AMBIG_FAMILY? 처리", check_ambig_family_flag,
+              report, core, html)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
-        guard(report, "B", "FLAG_SEV 대 qc_one 의 실제 플래그",
+        guard(report, "B", "FLAG_SEV 대 실제 플래그",
               check_flag_sev_keys, report, core, core_tree)
         guard(report, "B", "RULES 대 RULES_DOC 키", check_rules_doc, report, core)
         guard(report, "B", "옛 모듈 상수 잔존", check_moved_constants, report, core)
@@ -2049,6 +2140,7 @@ def main():
         guard(report, "E", "스터퍼 길이 판정 단위", check_stuffer_units, report, core)
         guard(report, "E", "대조군 판정 분기 단위", check_negctrl_units, report, core)
         guard(report, "E", "primer_ambiguity 단위", check_ambiguity_units, report, core)
+        guard(report, "E", "family 모호성 근거", check_family_ambiguity_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 

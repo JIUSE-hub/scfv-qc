@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.4"
+CORE_VERSION = "2.5"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -100,6 +100,7 @@ RULES = {
         "LINKER_DEL": 3, "QC_DEL": 3, "QC_ABSENT": 3,
         "ABERRANT_D1": 3, "ABERRANT_D2": 3, "TANDEM_REPEAT": 3, "MIXED": 3,
         "LONG_INSERT?": 2, "LOW_COVERAGE": 2, "PARENTAL?": 2,
+        "AMBIG_FAMILY?": 2,
         "QC_WARN": 1,
     },
 }
@@ -979,7 +980,34 @@ def _mm_positions(core, s, st):
     return [i for i in range(len(core)) if not hit(core[i], s[st + i])]
 
 
-def score_group(r, group, primers, cfg, chain=None):
+def ambiguity_context(primers, cfg):
+    """analyze 시작 시 한 번 계산해 call_one 에 넘기는 조회용 묶음.
+
+    클론마다 다시 계산하면 프라이머 수의 제곱에 비례해 낭비입니다.
+    """
+    pairs = primer_ambiguity(primers, cfg) if primers else []
+    return {"pairs": pairs,
+            "by_name": dict((frozenset((p["a"], p["b"])), p) for p in pairs)}
+
+
+def _amb_brief(p):
+    return {"a": p["a"], "b": p["b"], "k": p["incompatible"],
+            "tie": p["tie"], "families": "|".join(p["families"])}
+
+
+def family_ambiguity(amb, group, fam_a, fam_b):
+    """두 family 를 함께 아우르는 모호성 쌍. 없으면 빈 리스트."""
+    out = []
+    for p in (amb or {}).get("pairs", []):
+        if p["group"] != group or p["same_family"]:
+            continue
+        fams = set(p["families"])
+        if fam_a in fams and fam_b in fams:
+            out.append(p)
+    return out
+
+
+def score_group(r, group, primers, cfg, chain=None, amb=None):
     """그룹 내 모든 프라이머를 채점. 최소 미스매치 후보 집합과 차순위 간격 반환."""
     s = r["seq"]
     cands = []
@@ -1004,15 +1032,43 @@ def score_group(r, group, primers, cfg, chain=None):
     top = [c for c in cands if c["mm"] <= best + cfg["primer_margin_min"]]
     nxt = [c for c in cands if c["mm"] > best]
     fams = sorted(set(f for c in top for f in c["families"]))
+
+    # 판정 자체는 위에서 이미 끝났습니다. 아래는 그 판정이 알려진 프라이머
+    # 모호성 때문인지 알려주는 근거이며 판정값을 바꾸지 않습니다.
+    idx = (amb or {}).get("by_name", {})
+    names = [c["name"] for c in top]
+    seen, in_top = set(), []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            p = idx.get(frozenset((names[i], names[j])))
+            if p is not None and not p["same_family"]:
+                key = (p["a"], p["b"])
+                if key not in seen:
+                    seen.add(key)
+                    in_top.append(_amb_brief(p))
+    vs_next, seen2 = [], set()
+    if nxt:
+        lo = nxt[0]["mm"]
+        for a in names:
+            for c in nxt:
+                if c["mm"] != lo:
+                    continue
+                p = idx.get(frozenset((a, c["name"])))
+                if p is not None and (p["a"], p["b"]) not in seen2:
+                    seen2.add((p["a"], p["b"]))
+                    vs_next.append(_amb_brief(p))
+
     return {"mm": best,
             "delta": (nxt[0]["mm"] - best) if nxt else None,
-            "names": [c["name"] for c in top],
+            "names": names,
             "families": fams,
             "chain": top[0]["chain"],
             "mmpos": cands[0]["mmpos"],
             "core_len": cands[0]["len"],
             "start": cands[0]["start"],
-            "ok": best <= cfg["primer_max_mismatch"]}
+            "ok": best <= cfg["primer_max_mismatch"],
+            "ambiguity": in_top,
+            "runner_up_pairs": vs_next}
 
 
 # call_one 이 실제로 채점하는 그룹. 나머지 두 그룹의 모호성은 판정을 가르지 않습니다.
@@ -1147,14 +1203,14 @@ def cdr3_h3(prot):
     return seg[c + 1:last.start()]
 
 
-def call_one(r, primers, cfg):
-    """클론 1개의 프라이머 판별."""
+def call_one(r, primers, cfg, amb=None):
+    """클론 1개의 프라이머 판별. amb 는 analyze 가 한 번 계산해 넘기는 모호성 정보."""
     out = {"id": r["id"], "qc_verdict": r["verdict"]}
     flags = []
     notes = []
 
-    vh = score_group(r, "F1_For", primers, cfg)
-    jh = score_group(r, "F2_Rev", primers, cfg)
+    vh = score_group(r, "F1_For", primers, cfg, None, amb)
+    jh = score_group(r, "F2_Rev", primers, cfg, None, amb)
     out["vh"], out["jh"] = vh, jh
     if vh is None or not vh["ok"]:
         flags.append("NO_FRAG1")
@@ -1165,8 +1221,8 @@ def call_one(r, primers, cfg):
         else:
             notes.append("F1_For 판별 불가 (NotI 앵커 없음)")
 
-    vl_k = score_group(r, "F3_For", primers, cfg, "kappa")
-    vl_l = score_group(r, "F3_For", primers, cfg, "lambda")
+    vl_k = score_group(r, "F3_For", primers, cfg, "kappa", amb)
+    vl_l = score_group(r, "F3_For", primers, cfg, "lambda", amb)
     pool = [c for c in (vl_k, vl_l) if c is not None]
     vl = min(pool, key=lambda c: c["mm"]) if pool else None
     tie_chain = (vl_k is not None and vl_l is not None and vl_k["mm"] == vl_l["mm"])
@@ -1182,7 +1238,7 @@ def call_one(r, primers, cfg):
     elif tie_chain:
         notes.append("kappa/lambda 미스매치 동점 (%d) - 경쇄 판정 보류" % vl["mm"])
 
-    vj = score_group(r, "F3_Rev", primers, cfg, chain) if chain else None
+    vj = score_group(r, "F3_Rev", primers, cfg, chain, amb) if chain else None
     out["vj"] = vj
 
     if vl is not None and not vl["ok"] and r["pos_link"] >= 0:
@@ -1202,9 +1258,25 @@ def call_one(r, primers, cfg):
     fam_matched = (vh["families"] if (vh is not None and vh["ok"]) else [])
     if assigned and cfg["batch_vh_family"] != NOSEL and fam_matched:
         if cfg["batch_vh_family"] not in fam_matched:
-            flags.append("WRONG_FAMILY")
-            notes.append("배치 지정 %s 인데 %s 로 판정 - 튜브 간 교차오염 의심"
-                         % (cfg["batch_vh_family"], "|".join(fam_matched)))
+            # 배치 지정 family 와 판정 family 가 알려진 모호성 쌍으로 이어져 있으면
+            # 교차오염으로 단정할 수 없습니다. 플래그를 갈라 구분합니다.
+            hits = []
+            for f in fam_matched:
+                hits += family_ambiguity(amb, "F1_For", cfg["batch_vh_family"], f)
+            if hits:
+                flags.append("AMBIG_FAMILY?")
+                notes.append("배치 지정 %s 인데 %s 로 판정. 두 family 는 %s 로 "
+                             "구분되지 않으므로 교차오염으로 단정할 수 없음 - "
+                             "03_프라이머판별의 모호성 열 확인"
+                             % (cfg["batch_vh_family"], "|".join(fam_matched),
+                                ", ".join("%s/%s(%s, k%d)"
+                                          % (h["a"], h["b"], h["tie"], h["incompatible"])
+                                          for h in hits)))
+            else:
+                flags.append("WRONG_FAMILY")
+                notes.append("배치 지정 %s 인데 %s 로 판정 - 튜브 간 교차오염 의심. "
+                             "두 family 를 잇는 모호성 쌍은 없음"
+                             % (cfg["batch_vh_family"], "|".join(fam_matched)))
     if assigned and cfg["batch_chain"] != NOSEL and chain:
         if chain != cfg["batch_chain"]:
             flags.append("WRONG_CHAIN")
@@ -1426,6 +1498,20 @@ def glossary(primers=None, cfg=None):
          "정보이므로 하지 않습니다. family 칸의 JH1|JH2 처럼 프라이머 하나가 여러 germline 을 "
          "표적하는 경우도 같은 기호를 쓰지만, 이때 후보 프라이머는 1 개입니다."],
         ["프라이머 판별", "모호성 클러스터", _ambiguity_doc(primers, cfg)],
+        ["프라이머 판별", "VH4|VH6 같은 표기의 두 가지 뜻",
+         "family 칸에 여러 값이 | 로 적히는 경우는 두 가지이고 뜻이 다릅니다. "
+         "(a) 프라이머 하나가 여러 germline 을 표적하는 경우 — 예: JH1|JH2 는 "
+         "Rev-2-123 한 프라이머가 JH1 과 JH2 를 함께 잡도록 설계된 것입니다. "
+         "(b) 프라이머 여러 개가 서로 구분되지 않아 동점인 경우 — 예: VH4|VH6 은 "
+         "For-1-4b 와 For-1-6 이 같은 미스매치로 걸린 것입니다. "
+         "03_프라이머판별의 '후보수' 열로 구분합니다. 1 이면 (a), 2 이상이면 (b) 입니다. "
+         "(b) 라면 같은 시트의 '모호성' 열에 어느 쌍이 어느 등급으로 관여했는지 나옵니다."],
+        ["프라이머 판별", "AMBIG_FAMILY?",
+         "배치 지정 VH family 와 판정 family 가 다르지만, 두 family 가 알려진 모호성 "
+         "쌍으로 이어져 있어 교차오염으로 단정할 수 없는 경우입니다. 모호성 쌍이 없으면 "
+         "WRONG_FAMILY 가 붙습니다. 두 플래그를 가르는 것은 프라이머 설계상 구분 "
+         "가능한가이지 증거의 세기가 아니므로, AMBIG_FAMILY? 라도 교차오염이 아니라는 "
+         "뜻은 아닙니다. 03_프라이머판별의 모호성 열과 서열을 함께 보세요."],
         ["프라이머 판별", "모호성 등급 certain / split",
          "비호환 위치 수 k 와 허용 미스매치 T 로 나눕니다. certain (k <= T) 은 한쪽 "
          "프라이머와 완전히 같은 read 가 다른 쪽과도 허용 범위 안에 들어, 동점이 "
@@ -1600,6 +1686,20 @@ def final_verdict(r, p):
     return "PASS" if r["verdict"] == "PASS" else "PASS*"
 
 
+def fmt_call_ambiguity(c):
+    """한 판정에 관여한 모호성 쌍을 03_프라이머판별 한 칸으로."""
+    if not c:
+        return "-"
+    out = []
+    for x in c.get("ambiguity") or []:
+        out.append("동점 %s/%s (%s, %s, k%d)"
+                   % (x["a"], x["b"], x["families"], x["tie"], x["k"]))
+    for x in c.get("runner_up_pairs") or []:
+        out.append("차순위 %s/%s (%s, %s, k%d)"
+                   % (x["a"], x["b"], x["families"], x["tie"], x["k"]))
+    return " · ".join(out) or "-"
+
+
 def _fam(call):
     return "|".join(call["families"]) if (call and call["ok"]) else "-"
 
@@ -1647,7 +1747,7 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
     # 03 프라이머판별
     h3 = ["clone", "그룹", "대상", "판정 family", "후보 프라이머", "후보수",
           "미스매치", "Δ(차순위간격)", "판별구간(nt)", "불일치위치(1-based)",
-          "read상 시작위치", "허용 미스매치", "통과"]
+          "read상 시작위치", "허용 미스매치", "통과", "모호성"]
     grp = [("vh", "F1_For", "VH family"), ("jh", "F2_Rev", "JH"),
            ("vl", "F3_For", "VL V-gene"), ("vj", "F3_Rev", "VL J-gene")]
     r3 = []
@@ -1656,20 +1756,20 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
             c = p[key]
             if c is None:
                 r3.append([p["id"], gname, target, "-", "-", 0, None, None, None,
-                           "-", None, cfg["primer_max_mismatch"], "앵커없음"])
+                           "-", None, cfg["primer_max_mismatch"], "앵커없음", "-"])
                 continue
             r3.append([p["id"], gname, target,
                        "|".join(c["families"]) or "?", "|".join(c["names"]),
                        len(c["names"]), c["mm"], c["delta"], c["core_len"],
                        ", ".join(str(x + 1) for x in c["mmpos"]) or "-",
                        c["start"] + 1, cfg["primer_max_mismatch"],
-                       "OK" if c["ok"] else "FAIL"])
+                       "OK" if c["ok"] else "FAIL", fmt_call_ambiguity(c)])
         b = p["boundary"]
         r3.append([p["id"], "F2_For", "CDR3 경계 정합성", "-", b.get("primer", "-"), 0,
                    b.get("mm"), None, b.get("cmp"), "-", None,
-                   cfg["primer_max_mismatch"], b.get("status", "-")])
+                   cfg["primer_max_mismatch"], b.get("status", "-"), "-"])
     sheets.append({
-        "title": "03_프라이머판별", "headers": h3, "rows": r3, "wrap": [], "maxw": 60,
+        "title": "03_프라이머판별", "headers": h3, "rows": r3, "wrap": [13], "maxw": 60,
         "note": "그룹별 1행. Δ 는 최상위와 차순위 후보의 미스매치 간격이며 "
                 "클수록 판정 근거가 두껍습니다."})
 
@@ -2095,7 +2195,8 @@ def analyze(files, primer_text="", overrides=None, meta=None):
 
     qc_results = [qc_one(r, cfg) for r in reads]
     if primers:
-        calls = [call_one(r, primers, cfg) for r in qc_results]
+        amb = ambiguity_context(primers, cfg)
+        calls = [call_one(r, primers, cfg, amb) for r in qc_results]
     else:
         calls = [{"id": r["id"], "qc_verdict": r["verdict"], "vh": None, "jh": None,
                   "vl": None, "vj": None, "chain": None, "chain_tie": False,
