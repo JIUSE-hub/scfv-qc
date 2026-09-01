@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.7"
+CORE_VERSION = "2.8"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -1439,8 +1439,27 @@ def compose_called(calls, cfg):
     groups = {}
     for key, group, label in CALLED_GROUPS:
         ok = [p[key] for p in calls if p[key] is not None and p[key]["ok"]]
+        # 동점은 후보가 2 개 이상인 판정입니다. 프라이머 하나가 여러 germline 을
+        # 표적해 라벨에 | 가 들어가는 경우(예: JH1|JH2)는 동점이 아닙니다.
+        certain, possible, ties = set(), set(), {}
+        for c in ok:
+            fams = set(c["families"])
+            possible |= fams
+            if len(c["names"]) > 1:
+                lab = "|".join(c["families"]) or "?"
+                ties[lab] = ties.get(lab, 0) + 1
+            else:
+                certain |= fams
         groups[key] = {"group": group, "label": label, "n": len(ok),
-                       "tally": _tally(["|".join(c["families"]) or "?" for c in ok])}
+                       "tally": _tally(["|".join(c["families"]) or "?" for c in ok]),
+                       # 클론 수 분포(tally)는 동점 항목도 그대로 셉니다. 종 수만
+                       # 확정/가능으로 나눕니다.
+                       "species_certain": len(certain),
+                       "species_possible": len(possible),
+                       "species_only_possible": sorted(possible - certain),
+                       "ambiguous_items": sorted(ties.items(), key=lambda kv: -kv[1])}
+        # 화면과 시트가 같은 문구를 쓰도록 표기까지 core 에서 만듭니다.
+        groups[key]["species_text"] = fmt_species(groups[key])
     ch = [p["chain"] for p in calls if p["chain"]]
     lens = [p["cdr3_len"] for p in calls if p["cdr3_len"] is not None]
     return {"n_total": len(calls), "groups": groups,
@@ -1489,6 +1508,20 @@ def primer_coverage(calls, primers, cfg):
                     "p_miss": p_miss,
                     "underpowered": p_miss >= RULES["COVERAGE_ALPHA"]})
     return out
+
+
+def fmt_species(g):
+    """확정 종 수 · 가능 종 수를 사람이 읽을 한 줄로."""
+    cert, poss = g["species_certain"], g["species_possible"]
+    ties = g["ambiguous_items"]
+    if not ties:
+        return "%d 종 (동점 없음)" % cert
+    tie_txt = " · ".join("%s %d 클론" % (lab, n) for lab, n in ties)
+    if cert == poss:
+        note = "새 family 없음"
+    else:
+        note = "%s 는 동점으로만 관측" % ", ".join(g["species_only_possible"])
+    return "확정 %d 종 · 가능 %d 종 (동점 %s — %s)" % (cert, poss, tie_txt, note)
 
 
 def _pct(v, n):
@@ -1746,6 +1779,15 @@ def glossary(primers=None, cfg=None):
          "VH FR4 의 보존 모티프 " + CONST["FR4_MOTIF"] + " (Trp-Gly-Xxx-Gly). 정규식으로 쓰이며 "
          "CDR3-H3 의 끝 지점을 정한다. 이 모티프를 못 찾으면 CDR3-H3 가 추출되지 않는다."],
 
+        ["배치 조성", "확정 종 수와 가능 종 수",
+         "동점 판정(VH4|VH6 등)은 어느 family 인지 확정되지 않았으므로 종 수를 두 값으로 "
+         "센다. 확정 종 수는 단독 판정만으로 세고, 가능 종 수는 동점 항목의 구성원까지 "
+         "합집합으로 센다. 두 값이 같으면 동점이 새 family 를 만들지 않는다는 뜻이고, "
+         "다르면 그 차이만큼 다양성이 불확실하다. 클론 수 분포에서는 동점 항목도 "
+         "그대로 세므로 두 수치의 합계가 다를 수 있다. 동점은 후보 프라이머가 2 개 "
+         "이상인 판정을 말하며, 프라이머 하나가 여러 germline 을 표적해 라벨에 | 가 "
+         "들어가는 경우(예: JH1|JH2)는 동점이 아니라 단독 판정으로 센다."],
+
         ["재현성", "param_hash",
          "판정 임계값 16 개를 정렬해 만든 지문. 두 배치의 결과를 비교하려면 이 값이 같아야 합니다. "
          "실험 설계와 cDNA / RNA 출처는 해시에 포함되지 않고 05_실행설정 시트에 개별 기록됩니다. "
@@ -1948,8 +1990,8 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None, coverage=None
         if g["tally"]:
             for k, v in g["tally"]:
                 r4.append(["분포(판별)", label, "%s : %s" % (k, _pct(v, g["n"])), group])
-            r4.append(["분포(판별)", label + " (종 수)", len(g["tally"]),
-                       "모수 n=%d" % g["n"]])
+            r4.append(["분포(판별)", label + " (종 수)", fmt_species(g),
+                       "클론 수 분포는 동점 항목도 그대로 셉니다. 모수 n=%d" % g["n"]])
         else:
             r4.append(["분포(판별)", label, "-", "%s · 판별 성공 0 건" % group])
     cg = called["chain"]

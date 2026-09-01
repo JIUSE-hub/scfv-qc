@@ -1122,10 +1122,13 @@ function renderComposition(){
       ? "구조QC와 프라이머 판별을 모두 통과한 " + C.n_good + " / " + C.n_total + " 클론"
       : "그룹마다 판별에 성공한 클론만. 모수가 그룹별로 다릅니다") + "</span></div>";
 
-  const line = (a, n) => a.length
+  /* 종 수를 라벨 개수로 세면 동점 항목이 새 종처럼 보입니다. 판별 기준에서는
+     core 의 species_text(확정/가능)를 따로 붙이고 여기서는 모수만 적습니다. */
+  const line = (a, n, noSpecies) => a.length
     ? a.map(kv => esc(kv[0]) + " " + kv[1] +
         (n ? " (" + (100 * kv[1] / n).toFixed(1) + "%)" : "")).join(" / ") +
-      "  (" + a.length + " 종, n=" + (n == null ? C.n_good : n) + ")"
+      (noSpecies ? "  (n=" + n + ")"
+                 : "  (" + a.length + " 종, n=" + (n == null ? C.n_good : n) + ")")
     : "&mdash;";
   h += '<dl class="kv">';
   if (pass){
@@ -1142,10 +1145,12 @@ function renderComposition(){
         ? C.cdr3_lens.join(", ") + " aa  (중앙값 " + C.cdr3_median +
           ", n=" + C.cdr3_lens.length + ")" : "&mdash;") + "</dd>";
   }else{
+    // 종 수 표기는 core 의 species_text 를 그대로 씁니다 (04 시트와 같은 문구).
     Object.keys(K.groups).forEach(k => {
       const g = K.groups[k];
-      h += "<dt>" + esc(g.label) + "</dt><dd>" + line(g.tally, g.n) +
-        ' <span style="color:var(--muted)">· ' + esc(g.group) + "</span></dd>";
+      h += "<dt>" + esc(g.label) + "</dt><dd>" + line(g.tally, g.n, true) +
+        '<div style="margin-top:3px;color:var(--muted);font-size:12px">' +
+        esc(g.species_text) + " &middot; " + esc(g.group) + "</div></dd>";
     });
     h += "<dt>" + esc(K.chain.label) + "</dt><dd>" + line(K.chain.tally, K.chain.n) + "</dd>";
     h += "<dt>CDR3-H3 길이</dt><dd>" + (K.cdr3.n

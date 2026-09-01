@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.8"
+VERIFY_VERSION = "3.0"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1745,6 +1745,65 @@ def check_compose_called_units(report, core):
               " / ".join(bad))
 
 
+def check_species_count_units(report, core):
+    """확정 종 수 / 가능 종 수. 동점 구성원이 단독으로도 관측됐는지로 갈립니다."""
+    cfg = core.build_config(None, [])
+    bad = []
+
+    def vh(calls):
+        return core.compose_called(calls, cfg)["groups"]["vh"]
+
+    # (1) 동점 구성원이 단독으로도 관측됨 -> 차이 0 (260901 의 VH4|VH6 형태)
+    g = vh([_fake_call("a", vh=_fake_group(["pA"], ["VH4"])),
+            _fake_call("b", vh=_fake_group(["pB"], ["VH6"])),
+            _fake_call("c", vh=_fake_group(["pA", "pB"], ["VH4", "VH6"]))])
+    if (g["species_certain"], g["species_possible"]) != (2, 2):
+        bad.append("(1) 확정 %d · 가능 %d (기대 2·2)"
+                   % (g["species_certain"], g["species_possible"]))
+    if g["ambiguous_items"] != [("VH4|VH6", 1)]:
+        bad.append("(1) 동점 항목 %s" % g["ambiguous_items"])
+    if g["species_only_possible"]:
+        bad.append("(1) 동점으로만 관측 %s (기대 없음)" % g["species_only_possible"])
+
+    # (2) 동점 구성원 하나가 단독으로는 관측되지 않음 -> 차이 발생
+    g = vh([_fake_call("a", vh=_fake_group(["pA"], ["VH4"])),
+            _fake_call("c", vh=_fake_group(["pA", "pB"], ["VH4", "VH6"]))])
+    if (g["species_certain"], g["species_possible"]) != (1, 2):
+        bad.append("(2) 확정 %d · 가능 %d (기대 1·2)"
+                   % (g["species_certain"], g["species_possible"]))
+    if g["species_only_possible"] != ["VH6"]:
+        bad.append("(2) 동점으로만 관측 %s (기대 ['VH6'])" % g["species_only_possible"])
+
+    # (3) 동점 없음
+    g = vh([_fake_call("a", vh=_fake_group(["pA"], ["VH4"])),
+            _fake_call("b", vh=_fake_group(["pB"], ["VH6"]))])
+    if g["ambiguous_items"] or (g["species_certain"], g["species_possible"]) != (2, 2):
+        bad.append("(3) %s / %d·%d" % (g["ambiguous_items"], g["species_certain"],
+                                       g["species_possible"]))
+    # (4) 같은 family 가 어떤 클론에서는 단독, 다른 클론에서는 동점.
+    # 라벨 단위로 세면 "F1" 라벨에 동점 클론이 있다는 이유로 확정에서 빠집니다.
+    # 클론 단위라면 단독 판정한 클론이 하나라도 있으므로 확정입니다.
+    # (실측 VL V-gene 의 IGKV1 : 단독 2 클론 · 동점 3 클론)
+    g = vh([_fake_call("a", vh=_fake_group(["pA"], ["VH4"])),
+            _fake_call("b", vh=_fake_group(["pA", "pB"], ["VH4"]))])
+    if g["species_certain"] != 1 or g["species_only_possible"]:
+        bad.append("(4) 확정 %d · only_possible %s (기대 1 · [] · 클론 단위)"
+                   % (g["species_certain"], g["species_only_possible"]))
+    if g["ambiguous_items"] != [("VH4", 1)]:
+        bad.append("(4) 동점 항목 %s (기대 [('VH4', 1)])" % g["ambiguous_items"])
+
+    # 프라이머 하나가 여러 germline 을 표적하는 라벨은 동점이 아니다
+    g = vh([_fake_call("a", vh=_fake_group(["pJ"], ["JH1", "JH2"]))])
+    if g["ambiguous_items"] or g["species_certain"] != 2:
+        bad.append("다중 표적 라벨을 동점으로 봄 (%s / %d)"
+                   % (g["ambiguous_items"], g["species_certain"]))
+
+    report.ok("E", "확정/가능 종 수 단위", not bad,
+              "동점 구성원이 단독 관측되면 차이 0 · 아니면 차이 발생 · "
+              "같은 family 가 단독·동점 모두면 확정(클론 단위) · 다중 표적 라벨은 동점 아님",
+              " / ".join(bad))
+
+
 def check_primer_coverage_units(report, core):
     cfg = core.build_config(None, [])
     alpha = core.RULES["COVERAGE_ALPHA"]
@@ -2234,6 +2293,7 @@ LIB_EXPECT = {
     "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
     # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
     "called_n": {"vh": 29, "jh": 28, "vl": 29, "vj": 17},
+    "vh_species": (5, 5, [("VH4|VH6", 4)]),   # 확정 · 가능 · 동점 항목
     "coverage": {
         ("F1_For", "heavy"): (9, 6, 3, False),
         ("F2_Rev", "heavy"): (4, 4, 0, False),
@@ -2348,10 +2408,17 @@ def _check_h6(report, core, out):
         diff = [(k, got.get(k), want.get(k)) for k in sorted(set(got) | set(want))
                 if got.get(k) != want.get(k)]
         bad.append("커버리지 %s" % diff)
+    if called:
+        g = called["groups"]["vh"]
+        sp = (g["species_certain"], g["species_possible"],
+              [tuple(x) for x in g["ambiguous_items"]])
+        if sp != LIB_EXPECT["vh_species"]:
+            bad.append("VH 종 수 %s (기대 %s)" % (sp, LIB_EXPECT["vh_species"]))
     report.ok("H", H_NAMES[5], not bad,
-              "판별 성공 %s · 커버리지 %d 버킷 (표본 부족 %d)"
+              "판별 성공 %s · 커버리지 %d 버킷 (표본 부족 %d) · VH 확정 %d 가능 %d"
               % (LIB_EXPECT["called_n"], len(want),
-                 sum(1 for v in want.values() if v[3])),
+                 sum(1 for v in want.values() if v[3]),
+                 LIB_EXPECT["vh_species"][0], LIB_EXPECT["vh_species"][1]),
               " / ".join(bad))
 
 
@@ -2567,6 +2634,7 @@ def main():
         guard(report, "E", "landmark_quality 단위", check_landmark_quality_units,
               report, core)
         guard(report, "E", "compose_called 단위", check_compose_called_units, report, core)
+        guard(report, "E", "확정/가능 종 수 단위", check_species_count_units, report, core)
         guard(report, "E", "primer_coverage 단위", check_primer_coverage_units,
               report, core)
 
