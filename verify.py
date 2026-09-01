@@ -14,6 +14,7 @@ verify.py — pAIM1 scFv QC 웹도구 자체 검사
   [E] 단위   합성 서열로 core.check_landmark 의 5 개 상태를 직접 확인하고,
              index.html 의 badge() 가 그 표시값을 모두 처리하는지 대조
   [F] GLUE    index.html 의 GLUE 를 꺼내 실행해 배치별 호출과 병합을 검증
+  [G] 대조군  testdata/negctrl/ 실측 .ab1 로 대조군 판정과 인서트 지문을 고정
 
 RULES 커버리지
 ------------------------------------------------------------------------------
@@ -63,7 +64,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.2"
+VERIFY_VERSION = "2.3"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1738,6 +1739,133 @@ def _check_f6(report, box):
 
 
 # =============================================================================
+#  [G] 음성 대조군 실측 회귀
+# =============================================================================
+# testdata/negctrl/ 의 실측 .ab1 로 대조군 판정을 고정합니다. 디렉터리가 없으면
+# [G] 전체를 건너뜁니다. 대조군 모드는 프라이머 판별을 쓰지 않으므로 FASTA 없이
+# 돌립니다 (화면에서도 대조군 모드는 FASTA 를 요구하지 않습니다).
+NEGCTRL_DIR = os.path.join(TESTDATA, "negctrl")
+G_NAMES = ["G1 대조군 3 클론 판정", "G2 인서트 md5 고정",
+           "G3 대조군 시트 구조", "G4 negctrl design_hash"]
+
+_VEC = "%s-pAIM1-seq-For"       # 클론 ID = 확장자 뗀 파일명
+
+NEGCTRL_EXPECT = {
+    "verdicts": [(_VEC % "vec_1", "EMPTY_VECTOR"),
+                 (_VEC % "vec_2", "CARRYOVER"),
+                 (_VEC % "vec_3", "CARRYOVER")],
+    # 실측해 박은 32 자 md5. 빈 문자열이면 아직 실측 전이라는 뜻이고,
+    # 그때는 G2 가 측정값을 상세 칸에 찍고 실패합니다.
+    # vec_1 은 NotI/AscI 가 모두 없어 인서트가 계산되지 않으므로 지문이 없습니다.
+    "md5": {_VEC % "vec_2": "bdb1431f6378b361f1cc0f93cb172f38",   # 276 bp
+            _VEC % "vec_3": "ed98c77f6c5403204bbd535d49c4abf1"},  # 297 bp
+    # 라이브러리 c01 의 인서트 지문. vec_2 와 같아야 하며, 이 동일성이
+    # 벡터 준비물 오염의 근거입니다.
+    "c01_md5": "bdb1431f6378b361f1cc0f93cb172f38",
+    "design_hash": "17a2b7ea",
+    "titles": ["01_대조군판정", "02_구조QC상세", "03_대조군요약",
+               "04_실행설정", "05_용어설명", "06_서열"],
+    "sheet01_rows": 3,
+}
+
+
+def negctrl_inputs():
+    d = os.path.join(ROOT, NEGCTRL_DIR)
+    if not os.path.isdir(d):
+        return None
+    names = sorted(n for n in os.listdir(d) if n.lower().endswith(".ab1"))
+    if not names:
+        return None
+    out = []
+    for n in names:
+        with open(os.path.join(d, n), "rb") as fh:
+            out.append((n, fh.read()))
+    return out
+
+
+def check_negctrl_regression(report, core):
+    files = negctrl_inputs()
+    if files is None:
+        for n in G_NAMES:
+            report.add("G", n, SKIP, "testdata/negctrl/ 에 .ab1 이 없습니다")
+        return
+
+    cfg = core.build_config({"analysis_mode": core.MODE_NEGCTRL}, [])
+    report.ok("G", G_NAMES[3],
+              cfg["design_hash"] == NEGCTRL_EXPECT["design_hash"],
+              NEGCTRL_EXPECT["design_hash"],
+              "기대 %s 실제 %s" % (NEGCTRL_EXPECT["design_hash"], cfg["design_hash"]))
+
+    meta = {"runtime": "verify.py " + VERIFY_VERSION, "timestamp": "0",
+            "primer_file": "", "batch_label": "negctrl", "batch_date": ""}
+    out = core.analyze(files, "", {"analysis_mode": core.MODE_NEGCTRL}, meta)
+    if not out.get("ok") or not out.get("negctrl"):
+        for n in G_NAMES[:3]:
+            report.add("G", n, FAIL, "analyze 실패: " + "; ".join(out.get("errors", [])))
+        return
+    neg = out["negctrl"]
+    by_id = dict((c["id"], c) for c in neg["clones"])
+
+    # G1 판정과 근거
+    bad = []
+    for cid, want in NEGCTRL_EXPECT["verdicts"]:
+        c = by_id.get(cid)
+        if c is None:
+            bad.append("%s 없음" % cid)
+            continue
+        if c["verdict"] != want:
+            bad.append("%s %s(기대 %s)" % (cid.split("-")[0], c["verdict"], want))
+        if "인서트 " not in c["reason"] or "프레임" not in c["reason"]:
+            bad.append("%s reason 에 인서트/프레임 없음" % cid.split("-")[0])
+    if len(neg["clones"]) != len(NEGCTRL_EXPECT["verdicts"]):
+        bad.append("클론 %d 개 (기대 %d)"
+                   % (len(neg["clones"]), len(NEGCTRL_EXPECT["verdicts"])))
+    report.ok("G", G_NAMES[0], not bad,
+              " · ".join("%s %s" % (c.split("-")[0], v)
+                         for c, v in NEGCTRL_EXPECT["verdicts"]),
+              " / ".join(bad))
+
+    # G2 인서트 지문
+    bad, seen = [], []
+    for cid, want in sorted(NEGCTRL_EXPECT["md5"].items()):
+        got = (by_id.get(cid) or {}).get("insert_md5", "")
+        seen.append("%s %s" % (cid.split("-")[0], got or "(없음)"))
+        if not want:
+            bad.append("%s 기대 md5 미기입" % cid.split("-")[0])
+        elif got != want:
+            bad.append("%s md5 %s (기대 %s)" % (cid.split("-")[0], got, want))
+    vec2 = (by_id.get(_VEC % "vec_2") or {}).get("insert_md5", "")
+    if vec2 != NEGCTRL_EXPECT["c01_md5"]:
+        bad.append("vec_2 md5 가 라이브러리 c01 (%s) 과 다름" % NEGCTRL_EXPECT["c01_md5"])
+    report.ok("G", G_NAMES[1], not bad,
+              "vec_2 md5 = 라이브러리 c01 (%s…) · 32 자 고정"
+              % NEGCTRL_EXPECT["c01_md5"][:12],
+              " / ".join(bad) + " · 실측 " + " / ".join(seen))
+
+    # G3 시트 구조
+    sheets = out["sheets"]
+    bad = []
+    titles = [s["title"] for s in sheets]
+    if titles != NEGCTRL_EXPECT["titles"]:
+        bad.append("시트 제목 %s" % titles)
+    if sheets and len(sheets[0]["rows"]) != NEGCTRL_EXPECT["sheet01_rows"]:
+        bad.append("01 행 %d" % len(sheets[0]["rows"]))
+    s3 = [s for s in sheets if s["title"].startswith("03")]
+    kinds = set(r[0] for r in s3[0]["rows"]) if s3 else set()
+    for need in ("유형", "인서트 지문"):
+        if need not in kinds:
+            bad.append("03 에 '%s' 행 없음" % need)
+    n_type = len([r for r in s3[0]["rows"] if r[0] == "유형"]) if s3 else 0
+    if n_type != len(core.NEGCTRL_VERDICTS):
+        bad.append("03 유형 행 %d (기대 %d)" % (n_type, len(core.NEGCTRL_VERDICTS)))
+    report.ok("G", G_NAMES[2], not bad,
+              "%d 시트 · 01 %d 행 · 03 에 유형 %d 종과 지문 목록"
+              % (len(NEGCTRL_EXPECT["titles"]), NEGCTRL_EXPECT["sheet01_rows"],
+                 len(core.NEGCTRL_VERDICTS)),
+              " / ".join(bad))
+
+
+# =============================================================================
 #  실행
 # =============================================================================
 def main():
@@ -1822,9 +1950,12 @@ def main():
 
     if core is not None:
         guard(report, "F", "GLUE 경로", check_glue, report, glue, core)
+        guard(report, "G", "대조군 실측 회귀", check_negctrl_regression, report, core)
     else:
         for n in F_NAMES:
             report.add("F", n, FAIL, "core.py 를 불러올 수 없어 GLUE 를 돌리지 못했습니다")
+        for n in G_NAMES:
+            report.add("G", n, FAIL, "core.py 를 불러올 수 없습니다")
 
     ver = "core %s / notebook %s" % (core.CORE_VERSION, core.NB_VERSION) \
         if core is not None else "core.py 불러오기 실패"
@@ -1833,7 +1964,7 @@ def main():
     print_table(report)
     print("")
     parts = []
-    for s in ("A", "B", "C", "D", "E", "F"):
+    for s in ("A", "B", "C", "D", "E", "F", "G"):
         parts.append("[%s] 통과 %d 실패 %d 건너뜀 %d"
                      % (s, report.count(s, PASS), report.count(s, FAIL),
                         report.count(s, SKIP)))
