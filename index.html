@@ -382,6 +382,7 @@ def js_docs():
         # core.MODE_OPTS 의 순서를 그대로 씁니다. [0] 배치 지정, [1] 라이브러리 전체.
         # 순서가 뒤집히면 verify.py 의 [B] 가 잡습니다.
         "modeOpts": list(core.MODE_OPTS),
+        "lowQMark": core.RULES["LM_LOWQ_MARK"],
         "negLevel": dict(core.NEGCTRL_LEVEL),
         "negVerdicts": list(core.NEGCTRL_VERDICTS),
         "version": {"core": core.CORE_VERSION, "notebook": core.NB_VERSION,
@@ -934,9 +935,9 @@ $("#btnRun").addEventListener("click", async () => {
 /* ---------- 결과 ---------- */
 const COMPACT = ["clone","최종판정","인서트(bp)","프레임(%3)","d1(bp)","d2(bp)",
   "QC1","QC2","QC3","QC4","혼합(%)","VH family","JH","경쇄","VL-V family","VL-J",
-  "CDR3-H3","CDR3-H3(aa)"];
+  "CDR3-H3","CDR3-H3(aa)","이상 랜드마크 최저Q"];
 const NUMCOL = new Set(["사용길이(bp)","인서트(bp)","프레임(%3)","d1(bp)","d2(bp)",
-  "혼합(%)","CDR3-H3(aa)"]);
+  "혼합(%)","CDR3-H3(aa)","이상 랜드마크 최저Q"]);
 const MONOCOL = new Set(["clone","CDR3-H3","param_hash","VH family","JH",
   "VL-V family","VL-J"]);
 
@@ -982,7 +983,12 @@ function tableFor(H, R, exp){
       const name = H[i], v = row[i];
       const cls = NUMCOL.has(name) ? ' class="num"' : (MONOCOL.has(name) ? ' class="mono"' : "");
       let inner;
-      if (BADGECOL.has(name)) inner = badge(v);
+      if (name === "이상 랜드마크 최저Q" && v != null && v !== "")
+        // 기준값은 core 의 RULES["LM_LOWQ_MARK"] 에서 옵니다.
+        inner = (Number(v) < DOC.lowQMark)
+          ? '<span style="color:var(--warn);font-weight:600">' + esc(v) + "</span>"
+          : esc(v);
+      else if (BADGECOL.has(name)) inner = badge(v);
       else if (exp && name === "VH family") inner = expCell(exp.vh, v);
       else if (exp && name === "경쇄") inner = expCell(exp.chain, v);
       else inner = (v == null || v === "") ? '<span style="color:var(--muted)">-</span>' : esc(v);

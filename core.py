@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.5"
+CORE_VERSION = "2.6"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -94,6 +94,7 @@ RULES = {
     "REPEAT_MAX_PERIOD": 60,
     "EXO_TRIM": 3,
     "OVERLONG_ZONE": 5,
+    "LM_LOWQ_MARK": 20,
     "FLAG_SEV": {
         "CONCATEMER": 3, "PARENTAL": 3, "NO_NOTI": 3, "NO_ASCI": 3, "NO_LINKER": 3,
         "TOO_SHORT": 3, "TOO_LONG": 3, "FRAMESHIFT": 3, "INTERNAL_STOP": 3,
@@ -114,6 +115,8 @@ RULES_DOC = [
     ("EXO_TRIM", "CDR3 경계 정합성 검사에서 제외하는 양끝 nt. "
                  "proofreading exonuclease 모자이크 보정"),
     ("OVERLONG_ZONE", "F1_For 불일치 편중을 점검하는 판별구간 앞쪽 범위 (nt)"),
+    ("LM_LOWQ_MARK", "랜드마크 이상을 저품질로 표시하는 최저 Q 기준. "
+                     "표시 전용이며 판정에는 쓰이지 않는다"),
     ("FLAG_SEV", "플래그별 심각도. 여러 플래그가 동시에 붙을 때 어느 것을 verdict 로 삼을지 결정"),
 ]
 
@@ -1467,6 +1470,15 @@ def glossary(primers=None, cfg=None):
          "치환 + 갭이 허용 예산(허용치환 + 갭FAIL)을 넘어 랜드마크로 인식되지 않음."],
         ["QC 랜드마크", "상태 표기 NA",
          "해당 구간이 read 범위 밖이라 판단 불가. FAIL 이 아닙니다."],
+        ["QC 랜드마크", "이상 랜드마크 최저Q",
+         "상태가 OK 나 NA 가 아닌 랜드마크들의 최저 Phred 값이다. 이 값이 낮으면 "
+         "그 갭이나 치환이 실제 결실이 아니라 판독 오류일 수 있다. QC4 는 read 3' 끝에 "
+         "있어 품질이 먼저 무너지고, QC2 는 read 중간이라 상대적으로 신뢰할 만하다. "
+         "판정에는 반영되지 않으므로 FAIL 이라도 이 값이 낮으면 크로마토그램을 확인한다. "
+         "이상이 없는 클론에도 낮은 Q 는 흔하므로, 낮은 Q 자체가 아니라 '이상이 난 자리의 "
+         "Q 가 낮다'는 것이 신호다. 한 클론에 이상이 둘 이상이면 이 열은 그중 최저만 "
+         "보여주므로 개별 값은 02_구조QC상세에서 확인한다. 저품질 표시 기준은 "
+         "RULES 의 LM_LOWQ_MARK(%d)이며 표시 전용이다." % RULES["LM_LOWQ_MARK"]],
 
         ["트레이스 순도", "혼합(%)",
          "크로마토그램에서 각 염기 호출 위치의 2순위 피크 세기 / 1순위 피크 세기 비율을 계산해, "
@@ -1669,7 +1681,8 @@ SUMMARY_HEADERS = [
     "사용길이(bp)", "인서트(bp)", "프레임(%3)", "d1(bp)", "d2(bp)",
     "QC1", "QC2", "QC3", "QC4", "내부종결", "스터퍼", "탠덤반복", "혼합(%)",
     "VH family", "JH", "경쇄", "VL-V family", "VL-J",
-    "CDR3-H3", "CDR3-H3(aa)", "CDR3경계", "param_hash"]
+    "CDR3-H3", "CDR3-H3(aa)", "CDR3경계", "param_hash",
+    "이상 랜드마크 최저Q", "최저Q 랜드마크"]
 
 _STOP_TXT = {True: "OK", False: "FAIL", None: "-"}
 
@@ -1704,6 +1717,38 @@ def _fam(call):
     return "|".join(call["families"]) if (call and call["ok"]) else "-"
 
 
+_LM_KEYS = ("QC1", "QC2", "QC3", "QC4")
+
+
+def landmark_quality(r, cfg=None):
+    """이미 계산된 랜드마크 결과를 읽어 품질 근거로 요약한다.
+
+    qc_one / check_landmark 는 건드리지 않습니다. 판정에도 쓰이지 않고
+    사람이 갭의 진위를 판단할 근거를 모으기만 합니다.
+
+    worst_minq 는 '이상이 난 자리' 의 최저 Q 입니다. 이상이 없으면 None 이며,
+    이상 여부와 무관한 전체 최저 Q(all_minq)와 혼동하면 안 됩니다. 이상이 없는
+    클론에도 낮은 Q 는 흔하므로 낮은 Q 자체는 신호가 아닙니다.
+    한 클론에 이상이 둘 이상이면 worst_minq 는 그중 최저 하나만 가리키므로
+    개별 값은 02_구조QC상세에서 봐야 합니다.
+    cfg 는 지금 쓰지 않지만 임계값이 cfg 로 옮겨갈 때를 위해 받아 둡니다.
+    """
+    anomalies = []
+    for k in _LM_KEYS:
+        q = r["qc"][k]
+        if q["status"] in ("OK", "NA"):
+            continue
+        anomalies.append({"lm": k, "status": q["status"], "sub": q["sub"],
+                          "gap": q["gap"], "minq": q["minq"]})
+    scored = [a for a in anomalies if a["minq"] is not None]
+    worst = min(scored, key=lambda a: a["minq"]) if scored else None
+    every = [r["qc"][k]["minq"] for k in _LM_KEYS if r["qc"][k]["minq"] is not None]
+    return {"anomalies": anomalies,
+            "worst_minq": worst["minq"] if worst else None,
+            "worst_lm": worst["lm"] if worst else None,
+            "all_minq": min(every) if every else None}
+
+
 def build_summary(qc_results, calls, cfg, meta=None):
     """batch / date 는 파일명이 아니라 폼에서 받은 meta 값을 씁니다."""
     meta = meta or {}
@@ -1714,6 +1759,7 @@ def build_summary(qc_results, calls, cfg, meta=None):
     for r in qc_results:
         p = by_id[r["id"]]
         ins = r["insert_bp"]
+        lq = landmark_quality(r, cfg)
         rows.append([
             r["id"], batch, date, r["primer"], r["direction"],
             final_verdict(r, p), r["verdict"], ", ".join(p["flags"]) or "-",
@@ -1725,7 +1771,7 @@ def build_summary(qc_results, calls, cfg, meta=None):
             _fam(p["vh"]), _fam(p["jh"]), p["chain"] or "-",
             _fam(p["vl"]), _fam(p["vj"]),
             p["cdr3"] or "-", p["cdr3_len"], p["boundary"].get("status", "-"),
-            cfg["param_hash"]])
+            cfg["param_hash"], lq["worst_minq"], lq["worst_lm"] or ""])
     return rows
 
 
@@ -1806,6 +1852,27 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
     r4.append(["CDR3-H3", "중복 서열 수", len(comp["cdr3_dup"]),
                ", ".join(comp["cdr3_dup"]) if comp["cdr3_dup"]
                else "동일 CDR3-H3 를 가진 클론 없음"])
+    # 랜드마크 이상의 판독 품질. 판정에는 반영되지 않는 표시 전용 근거입니다.
+    mark = RULES["LM_LOWQ_MARK"]
+    lqs = [landmark_quality(r, cfg) for r in qc_results]
+    with_anom = [q for q in lqs if q["anomalies"]]
+    lowq = [q for q in with_anom
+            if q["worst_minq"] is not None and q["worst_minq"] < mark]
+    r4.append(["점검", "랜드마크 이상 중 저품질(Q<%d)" % mark,
+               "%d / %d 건" % (len(lowq), len(with_anom)),
+               "판정에는 반영되지 않습니다. 해당 갭이 실제 결실인지 판독 오류인지는 "
+               "크로마토그램으로 확인하세요. 클론별 값은 01_판정요약의 "
+               "'이상 랜드마크 최저Q' 열, 랜드마크별 값은 02_구조QC상세에 있습니다."])
+    for k in _LM_KEYS:
+        hit = [a for q in lqs for a in q["anomalies"] if a["lm"] == k]
+        if not hit:
+            continue
+        low = [a for a in hit if a["minq"] is not None and a["minq"] < mark]
+        qs = sorted(a["minq"] for a in hit if a["minq"] is not None)
+        med = _fmt_med(median(qs)) if qs else "-"
+        r4.append(["점검", "%s 이상" % k,
+                   "%d 건 · 저품질 %d 건" % (len(hit), len(low)),
+                   "최저 Q 중앙값 %s" % med])
     if comp["overlong_suspect"]:
         r4.append(["점검", "F1_For 불일치 앞쪽 편중",
                    ", ".join(comp["overlong_suspect"]),

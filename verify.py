@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.6"
+VERIFY_VERSION = "2.7"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1654,6 +1654,51 @@ def check_family_ambiguity_units(report, core):
               "모호성 있음 → AMBIG_FAMILY? · 없음 → WRONG_FAMILY", " / ".join(bad))
 
 
+def check_landmark_quality_units(report, core):
+    """landmark_quality 단위시험. qc_one 결과 dict 를 직접 만들어 넣습니다."""
+    def lm(status, minq, sub=0, gap=0):
+        return {"status": status, "minq": minq, "sub": sub, "gap": gap,
+                "pos": 0, "level": "OK"}
+
+    def rec(**kw):
+        qc = dict((k, lm("OK", 40)) for k in ("QC1", "QC2", "QC3", "QC4"))
+        qc.update(kw)
+        return {"qc": qc}
+
+    bad = []
+    # 이상 없음 : OK 와 NA 만 있으면 anomalies 는 비고 worst 는 None
+    q = core.landmark_quality(rec(QC1=lm("OK", 8), QC3=lm("NA", None)))
+    if q["anomalies"] or q["worst_minq"] is not None or q["worst_lm"] is not None:
+        bad.append("이상 없음인데 %s / %s" % (q["anomalies"], q["worst_minq"]))
+    if q["all_minq"] != 8:
+        bad.append("all_minq %s (기대 8 · 이상 여부와 무관한 전체 최저)" % q["all_minq"])
+
+    # 이상 1 개 : 그 랜드마크의 minq
+    q = core.landmark_quality(rec(QC4=lm("GAP4", 3, gap=4)))
+    if q["worst_minq"] != 3 or q["worst_lm"] != "QC4" or len(q["anomalies"]) != 1:
+        bad.append("이상 1 개인데 %s/%s" % (q["worst_minq"], q["worst_lm"]))
+
+    # 이상 2 개 : 낮은 쪽과 그 이름 (실측 VH2-VK_2 형태)
+    q = core.landmark_quality(rec(QC2=lm("GAP5", 51, gap=5), QC4=lm("GAP4", 3, gap=4)))
+    if q["worst_minq"] != 3 or q["worst_lm"] != "QC4" or len(q["anomalies"]) != 2:
+        bad.append("이상 2 개인데 %s/%s (%d 개)"
+                   % (q["worst_minq"], q["worst_lm"], len(q["anomalies"])))
+
+    # minq 가 None 인 이상(NA 아님)이 섞인 경우 : 값 있는 쪽에서 고른다
+    q = core.landmark_quality(rec(QC2=lm("ABSENT", None), QC4=lm("GAP4", 12, gap=4)))
+    if q["worst_minq"] != 12 or q["worst_lm"] != "QC4" or len(q["anomalies"]) != 2:
+        bad.append("None 섞인 이상에서 %s/%s" % (q["worst_minq"], q["worst_lm"]))
+
+    # 이상이 전부 minq None 이면 anomalies 는 있고 worst 는 None
+    q = core.landmark_quality(rec(QC2=lm("ABSENT", None)))
+    if not q["anomalies"] or q["worst_minq"] is not None:
+        bad.append("전부 None 인데 worst %s" % q["worst_minq"])
+
+    report.ok("E", "landmark_quality 단위", not bad,
+              "이상 없음 → None · 1 개 → 그 값 · 2 개 → 낮은 쪽 · minq None 혼재 처리",
+              " / ".join(bad))
+
+
 def check_badge_states(report, js):
     body = js_function_body(js, "badge")
     if body is None:
@@ -2066,7 +2111,7 @@ def check_negctrl_regression(report, core):
 # 개별 변동은 흡수하되 전체 경향이 바뀌면 잡히게 합니다.
 LIB_DIR = os.path.join(TESTDATA, "lib260901")
 H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
-           "H4 오염 분자 추적"]
+           "H4 오염 분자 추적", "H5 랜드마크 이상 품질"]
 
 LIB_EXPECT = {
     "n": 49,
@@ -2099,6 +2144,12 @@ LIB_EXPECT = {
     "wrong": {"clone": "VH5-VK_1", "batch": ("VH5", "kappa")},
     "carry": {"md5": "bdb1431f6378b361f1cc0f93cb172f38",
               "clones": ["VH1-VK_3", "VH2-VK_9", "VH4-VK_3"]},
+    # 랜드마크 이상의 판독 품질 (표시 계층. 판정에는 반영되지 않음)
+    "lm_anomaly_clones": 25,
+    "lm_lowq_clones": 13,
+    # QC2 는 실측 17 건입니다(제시값 18). minq 중앙값 29 · 범위 5~51 은 일치하므로
+    # 개수만 어긋난 것으로 보고 실측값으로 고정합니다.
+    "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
 }
 
 
@@ -2148,6 +2199,7 @@ def check_lib_regression(report, core):
             report.add("H", n, FAIL, "analyze 실패: " + "; ".join(out.get("errors", [])))
         return
     _check_h1(report, out)
+    _check_h5(report, core, out)
     _check_h3(report, core, out, files, meta)
     _check_h4(report, out, core)
     _check_h2(report, core, files, ptext, meta)
@@ -2184,6 +2236,34 @@ def _check_h1(report, out):
     report.ok("H", H_NAMES[0], not bad,
               "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종"
               % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags)),
+              " / ".join(bad))
+
+
+def _check_h5(report, core, out):
+    """랜드마크 이상의 판독 품질 분포. 표시 계층이라 판정과 무관하게 고정합니다."""
+    mark = core.RULES["LM_LOWQ_MARK"]
+    by_key = dict((k, 0) for k in ("QC1", "QC2", "QC3", "QC4"))
+    n_anom = n_low = 0
+    for q in out["qc"]:
+        lq = core.landmark_quality(q)
+        if not lq["anomalies"]:
+            continue
+        n_anom += 1
+        if lq["worst_minq"] is not None and lq["worst_minq"] < mark:
+            n_low += 1
+        for a in lq["anomalies"]:
+            by_key[a["lm"]] += 1
+    bad = []
+    if n_anom != LIB_EXPECT["lm_anomaly_clones"]:
+        bad.append("이상 클론 %d (기대 %d)" % (n_anom, LIB_EXPECT["lm_anomaly_clones"]))
+    if n_low != LIB_EXPECT["lm_lowq_clones"]:
+        bad.append("저품질 클론 %d (기대 %d)" % (n_low, LIB_EXPECT["lm_lowq_clones"]))
+    if by_key != LIB_EXPECT["lm_by_key"]:
+        bad.append("랜드마크별 %s (기대 %s)" % (by_key, LIB_EXPECT["lm_by_key"]))
+    report.ok("H", H_NAMES[4], not bad,
+              "이상 %d 클론 · Q<%d %d 클론 · %s"
+              % (LIB_EXPECT["lm_anomaly_clones"], mark,
+                 LIB_EXPECT["lm_lowq_clones"], LIB_EXPECT["lm_by_key"]),
               " / ".join(bad))
 
 
@@ -2368,6 +2448,8 @@ def main():
         guard(report, "E", "대조군 판정 분기 단위", check_negctrl_units, report, core)
         guard(report, "E", "primer_ambiguity 단위", check_ambiguity_units, report, core)
         guard(report, "E", "family 모호성 근거", check_family_ambiguity_units, report, core)
+        guard(report, "E", "landmark_quality 단위", check_landmark_quality_units,
+              report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 
