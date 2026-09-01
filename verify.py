@@ -67,7 +67,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.5"
+VERIFY_VERSION = "3.6"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -767,6 +767,39 @@ def seg_keys_in_form(js):
     #dz_<key> 로 하나씩 읽으므로 readConfig 안에 이름이 있어야 합니다.
     """
     return _form_key_arrays(js)[0]
+
+
+# 폼 생성기는 id 를 접두어 + 키로 만들고 readConfig 는 같은 접두어로 찾아옵니다.
+# 한쪽만 바뀌면 화면은 멀쩡한데 값이 안 읽히므로 양방향으로 대조합니다.
+_ID_MAKE = re.compile(r'id="([A-Za-z0-9_]+)"')
+_ID_MAKE_PREFIX = re.compile(r"""id="([A-Za-z0-9_]+)'\s*\+""")
+_ID_QUERY = re.compile(r'\$\$?\(\s*"#([A-Za-z0-9_]+)([^"]*)"(\s*\+)?')
+
+
+def check_dom_ids(report, html, js):
+    """만들어지는 id 와 찾는 id 가 맞는가."""
+    made = set(_ID_MAKE.findall(html))
+    made_pre = set(_ID_MAKE_PREFIX.findall(html))
+    want_lit, want_pre = set(), set()
+    for name, rest, plus in _ID_QUERY.findall(js):
+        if plus and not rest:
+            want_pre.add(name)
+        else:
+            want_lit.add(name)
+    bad = []
+    miss = sorted(want_lit - made)
+    if miss:
+        bad.append("찾는데 안 만들어지는 id: " + ", ".join(miss))
+    miss_pre = sorted(want_pre - made_pre)
+    if miss_pre:
+        bad.append("찾는데 안 만들어지는 접두어: " + ", ".join(miss_pre))
+    dead_pre = sorted(made_pre - want_pre)
+    if dead_pre:
+        bad.append("만들지만 아무도 안 찾는 접두어: " + ", ".join(dead_pre))
+    report.ok("B", "DOM id 대조", not bad,
+              "고정 id %d + 접두어 %d (%s) 전부 양쪽 일치"
+              % (len(want_lit), len(made_pre), ", ".join(sorted(made_pre))),
+              " / ".join(bad))
 
 
 def check_readconfig_covers_design(report, js, core, glue=""):
@@ -3133,6 +3166,7 @@ def main():
         guard(report, "B", "SUMMARY_HEADERS 대조", check_summary_headers, report, js, core)
         guard(report, "B", "JS 참조 키 대조", check_js_keys,
               report, js, core, keyset, doc_keys, doc_sub)
+        guard(report, "B", "DOM id 대조", check_dom_ids, report, html, js)
         guard(report, "B", "readConfig 가 DESIGN_KEYS 를 덮는가",
               check_readconfig_covers_design, report, js, core, glue or "")
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)

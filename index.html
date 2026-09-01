@@ -7,7 +7,14 @@
 <style>
 :root{
   --snu:#003876; --snu-dark:#00265a; --snu-tint:#e9eff7; --snu-tint2:#f5f8fc;
-  --ink:#111827; --muted:#6b7280; --line:#e3e8ef; --bg:#fff;
+  --snu-hover:#00417f;
+  --ink:#0f172a; --ink-2:#475569; --muted:#94a3b8; --line:#e3e8ef; --bg:#fff;
+  --soft:#f8fafc; --field:#d5dce6; --field-hover:#b9c5d4;
+  --danger-bg:#fef2f2; --danger-line:#fecaca;
+  --ring:0 0 0 3px rgba(0,56,118,.10);
+  --sh-1:0 1px 2px rgba(15,23,42,.04), 0 1px 3px rgba(15,23,42,.06);
+  --sh-2:0 1px 2px rgba(15,23,42,.06), 0 4px 12px rgba(15,23,42,.07);
+  --arrow:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%2364748b' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   --pass:#15803d; --fail:#b91c1c; --warn:#b45309; --check:#1d4ed8;
   --mono: ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
   --sans: -apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",Roboto,sans-serif;
@@ -20,7 +27,8 @@ a{color:var(--snu)}
 h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em}
 
 /* ---------- 헤더 ---------- */
-header{background:var(--snu);color:#fff;padding:22px 0 20px}
+header{background:linear-gradient(180deg,var(--snu),var(--snu-dark));
+       color:#fff;padding:22px 0 20px}
 .wrap{max-width:1180px;margin:0 auto;padding:0 22px}
 header h1{font-size:19px;letter-spacing:0}
 header .sub{font-size:12.5px;opacity:.72;margin-top:3px}
@@ -29,9 +37,9 @@ header .ver{font-size:11.5px;opacity:.6;margin-top:8px;font-family:var(--mono)}
 /* ---------- 섹션 ---------- */
 main{padding:26px 0 60px}
 section{background:var(--bg);border:1px solid var(--line);border-radius:10px;
-        margin-bottom:18px;overflow:hidden}
+        margin-bottom:18px;overflow:hidden;box-shadow:var(--sh-1)}
 .sec-h{display:flex;align-items:baseline;gap:10px;padding:14px 20px;
-       border-bottom:1px solid var(--line);background:#fcfdfe}
+       border-bottom:1px solid var(--line);background:var(--soft)}
 .sec-h .n{font-family:var(--mono);font-size:11px;color:#fff;background:var(--snu);
           border-radius:4px;padding:2px 7px;letter-spacing:.04em}
 .sec-h h2{font-size:15px}
@@ -41,14 +49,14 @@ section{background:var(--bg);border:1px solid var(--line);border-radius:10px;
 /* ---------- 파일 ---------- */
 .drops{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:760px){.drops{grid-template-columns:1fr}}
-.drop{border:1.5px dashed #c4d0e0;border-radius:9px;background:var(--snu-tint2);
+.drop{border:1.5px dashed var(--field);border-radius:10px;background:var(--snu-tint2);
       padding:20px 16px;text-align:center;cursor:pointer;transition:.13s}
 .drop:hover,.drop.over{border-color:var(--snu);background:var(--snu-tint)}
 .drop .t{font-weight:600;font-size:13.5px;color:var(--snu-dark)}
 .drop .d{font-size:12px;color:var(--muted);margin-top:4px}
 .filelist{margin-top:14px;font-size:13px}
 .filerow{display:flex;align-items:center;gap:10px;padding:6px 10px;border-radius:6px}
-.filerow:nth-child(odd){background:var(--snu-tint2)}
+.filerow:nth-child(odd){background:var(--soft)}
 .filerow .nm{font-family:var(--mono);font-size:12.5px;flex:1;overflow:hidden;
              text-overflow:ellipsis;white-space:nowrap}
 .filerow .sz{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums}
@@ -57,41 +65,64 @@ section{background:var(--bg);border:1px solid var(--line);border-radius:10px;
 .filerow button:hover{color:var(--fail)}
 
 /* ---------- 탭 ---------- */
-.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 20px;background:#fcfdfe}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);padding:0 20px;
+      background:var(--soft)}
 .tab{border:0;background:none;padding:10px 14px;font:inherit;font-size:13px;
-     color:var(--muted);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+     color:var(--ink-2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab:hover{color:var(--snu-dark)}
 .tab.on{color:var(--snu);border-bottom-color:var(--snu);font-weight:600}
 .pane{display:none;padding:18px 20px}
 .pane.on{display:block}
 
 /* ---------- 폼 ---------- */
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px 20px}
-.fld{display:flex;align-items:center;gap:10px}
-.fld label{flex:0 0 150px;font-size:13px;color:#374151}
-.fld .desc{font-size:11.5px;color:var(--muted);flex:1;min-width:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:16px 18px}
+/* 라벨 -> 입력칸 -> 설명 을 세로로 쌓습니다. 가로 3 칸일 때 설명 몫이 100px
+   아래로 내려가 단어가 어색하게 접히던 것을 없애기 위한 배치입니다. */
+.fld{display:flex;flex-direction:column;align-items:stretch;gap:5px;min-width:0}
+.fld label{font-size:12.5px;font-weight:600;color:var(--ink);letter-spacing:-.005em}
+.fld .desc{font-size:11.5px;color:var(--ink-2);line-height:1.5;
+           display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+           overflow:hidden}
+.fld:hover .desc{-webkit-line-clamp:unset;overflow:visible}
+.fld .seg{align-self:flex-start}
 input[type=number],select,input[type=text]{
-  font:inherit;font-size:13px;padding:5px 8px;border:1px solid #cfd8e3;border-radius:6px;
-  background:#fff;color:var(--ink);width:96px}
-select{width:auto;min-width:130px}
-input:focus,select:focus{outline:2px solid var(--snu-tint);border-color:var(--snu)}
+  font:inherit;font-size:13px;padding:8px 11px;border:1px solid var(--field);border-radius:8px;
+  background:var(--bg);color:var(--ink);width:100%;
+  transition:border-color .12s,box-shadow .12s}
+input[type=number]:hover,select:hover,input[type=text]:hover{border-color:var(--field-hover)}
+select{appearance:none;-webkit-appearance:none;padding-right:30px;cursor:pointer;
+       background-image:var(--arrow);background-repeat:no-repeat;
+       background-position:right 11px center}
+input:focus,select:focus{outline:0;border-color:var(--snu);box-shadow:var(--ring)}
 .chg{border-color:var(--warn)!important;background:#fffbeb!important}
-.seg{display:inline-flex;border:1px solid #cfd8e3;border-radius:6px;overflow:hidden}
-.seg button{border:0;background:#fff;font:inherit;font-size:12.5px;padding:5px 13px;cursor:pointer;color:var(--muted)}
+.seg{display:inline-flex;border:1px solid var(--field);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:var(--bg);font:inherit;font-size:12.5px;padding:7px 18px;
+            cursor:pointer;color:var(--ink-2);transition:background .12s,color .12s}
+.seg button:hover{background:var(--soft);color:var(--snu-dark)}
 .seg button.on{background:var(--snu);color:#fff}
-.chk{display:flex;align-items:center;gap:8px;font-size:13px}
-.grp{margin-bottom:20px}
-.grp>h3{font-size:12px;color:var(--snu);text-transform:none;letter-spacing:.02em;
-        margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.note{font-size:12.5px;color:var(--muted);margin:-4px 0 12px}
+.seg button.on:hover{background:var(--snu-dark);color:#fff}
+.chk{display:flex;align-items:flex-start;gap:10px;font-size:13px;
+     background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.chk input{margin:3px 0 0;flex:0 0 auto}
+.chk label{font-weight:600;color:var(--ink);cursor:pointer;min-width:0}
+.chk .cdesc{display:block;font-weight:400;font-size:11.5px;color:var(--ink-2);
+            line-height:1.5;margin-top:2px}
+.grp{margin-bottom:22px}
+.grp>h3{font-size:11px;color:var(--snu);letter-spacing:.08em;font-weight:700;
+        margin-bottom:10px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+.note{font-size:12.5px;color:var(--ink-2);margin:-2px 0 14px;
+      padding-bottom:10px;border-bottom:1px dotted var(--line)}
 
 /* ---------- 버튼 ---------- */
-.btn{font:inherit;font-size:13.5px;font-weight:600;padding:9px 20px;border-radius:7px;
+.btn{font:inherit;font-size:13.5px;font-weight:600;padding:9px 20px;border-radius:8px;
      border:1px solid var(--snu);background:var(--snu);color:#fff;cursor:pointer;transition:.13s}
-.btn:hover:not(:disabled){background:var(--snu-dark);border-color:var(--snu-dark)}
+.btn:hover:not(:disabled){background:var(--snu-hover);border-color:var(--snu-hover);
+                          box-shadow:var(--sh-2)}
+.btn:focus-visible{outline:0;box-shadow:var(--ring)}
 .btn:disabled{opacity:.4;cursor:not-allowed}
 .btn.ghost{background:#fff;color:var(--snu)}
-.btn.ghost:hover:not(:disabled){background:var(--snu-tint)}
-.btn.sm{font-size:12.5px;padding:6px 13px;font-weight:500}
+.btn.ghost:hover:not(:disabled){background:var(--snu-tint);box-shadow:var(--sh-1)}
+.btn.sm{font-size:12.5px;padding:7px 14px;font-weight:500;border-radius:8px}
 .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
 
 /* ---------- 상태 ---------- */
@@ -105,19 +136,21 @@ input:focus,select:focus{outline:2px solid var(--snu-tint);border-color:var(--sn
 .err-box pre{font-family:var(--mono);font-size:11.5px;white-space:pre-wrap;margin:8px 0 0}
 
 /* ---------- 표 ---------- */
-.tblwrap{overflow:auto;max-height:66vh;border:1px solid var(--line);border-radius:8px}
+.tblwrap{overflow:auto;max-height:66vh;border:1px solid var(--line);border-radius:10px;
+         box-shadow:var(--sh-1)}
 table{border-collapse:separate;border-spacing:0;font-size:12.5px;width:100%}
 th,td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left}
 th{position:sticky;top:0;background:var(--snu);color:#fff;font-weight:600;z-index:2;
    font-size:11.5px;letter-spacing:.01em}
-tbody tr:hover td{background:var(--snu-tint2)}
+tbody tr:hover td{background:var(--soft)}
 td:first-child,th:first-child{position:sticky;left:0;z-index:1}
 th:first-child{z-index:3}
-td:first-child{background:#fff;font-family:var(--mono);font-weight:600}
-tbody tr:hover td:first-child{background:var(--snu-tint2)}
+td:first-child{background:var(--bg);font-family:var(--mono);font-weight:600}
+tbody tr:hover td:first-child{background:var(--soft)}
 td.num{text-align:right;font-variant-numeric:tabular-nums}
 td.mono{font-family:var(--mono);font-size:12px}
-.badge{display:inline-block;padding:1px 8px;border-radius:11px;font-size:11.5px;font-weight:600}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:11.5px;
+       font-weight:600;letter-spacing:.01em}
 .b-pass{background:#dcfce7;color:var(--pass)}
 .b-fail{background:#fee2e2;color:var(--fail)}
 .b-warn{background:#fef3c7;color:var(--warn)}
@@ -125,50 +158,59 @@ td.mono{font-family:var(--mono);font-size:12px}
 .b-none{background:#f1f5f9;color:var(--muted)}
 
 /* ---------- 상세 ---------- */
-.detail{border:1px solid var(--line);border-radius:8px;margin-top:8px;overflow:hidden}
-.detail summary{padding:9px 14px;cursor:pointer;font-size:13px;background:#fcfdfe;
-                display:flex;align-items:center;gap:9px}
+.detail{border:1px solid var(--line);border-radius:10px;margin-top:8px;overflow:hidden;
+        box-shadow:var(--sh-1)}
+.detail summary{padding:10px 14px;cursor:pointer;font-size:13px;background:var(--soft);
+                display:flex;align-items:center;gap:9px;transition:background .12s}
+.detail summary:hover{background:var(--snu-tint)}
 .detail summary::-webkit-details-marker{display:none}
 .detail summary::before{content:"▸";color:var(--muted);font-size:11px}
 .detail[open] summary::before{content:"▾"}
 .detail .body{padding:10px 16px 14px;border-top:1px solid var(--line)}
-.detail ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:#374151}
+.detail ul{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--ink-2)}
 .detail li{margin:3px 0}
-.chip{display:inline-block;background:#fee2e2;color:var(--fail);border-radius:5px;
-      padding:1px 7px;font-size:11.5px;font-family:var(--mono);margin-right:5px}
+.chip{display:inline-block;background:#fee2e2;color:var(--fail);border-radius:6px;
+      padding:2px 8px;font-size:11.5px;font-family:var(--mono);margin-right:5px}
 
 /* ---------- 조성 ---------- */
 .kv{display:grid;grid-template-columns:150px 1fr;gap:5px 14px;font-size:13px}
-.kv dt{color:var(--muted)} .kv dd{margin:0}
+.kv dt{color:var(--ink-2)} .kv dd{margin:0}
 
 /* ---------- 문서 ---------- */
 .doc details{border-top:1px solid var(--line)}
 .doc details:first-of-type{border-top:0}
-.doc summary{padding:11px 2px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--snu-dark);
-             display:flex;align-items:center;gap:8px}
+.doc summary{padding:12px 2px;cursor:pointer;font-size:13.5px;font-weight:600;color:var(--snu-dark);
+             display:flex;align-items:center;gap:8px;transition:color .12s}
+.doc summary:hover{color:var(--snu)}
 .doc summary::-webkit-details-marker{display:none}
 .doc summary::before{content:"▸";color:var(--muted);font-size:11px}
 .doc details[open] summary::before{content:"▾"}
 .doc summary .cnt{margin-left:auto;font-size:11.5px;color:var(--muted);font-weight:400}
 .doc .body{padding:2px 0 16px}
-.gitem{padding:9px 0;border-top:1px dotted var(--line);display:grid;
+.gitem{padding:10px 0;border-top:1px dotted var(--line);display:grid;
        grid-template-columns:190px 1fr;gap:16px}
 .gitem:first-child{border-top:0}
-.gitem .t{font-weight:600;font-size:12.5px;color:#1f2937}
-.gitem .d{font-size:12.5px;color:#4b5563;word-break:break-word}
-.gitem .d code{font-family:var(--mono);font-size:11.5px;background:var(--snu-tint2);
-               padding:1px 4px;border-radius:3px;word-break:break-all}
+.gitem .t{font-weight:600;font-size:12.5px;color:var(--ink)}
+.gitem .d{font-size:12.5px;color:var(--ink-2);word-break:break-word}
+.gitem .d code{font-family:var(--mono);font-size:11.5px;background:var(--soft);
+               border:1px solid var(--line);
+               padding:1px 5px;border-radius:4px;word-break:break-all}
 @media(max-width:700px){.gitem{grid-template-columns:1fr;gap:3px}}
 /* ---------- 배치 카드 ---------- */
-.bcard{border:1px solid var(--line);border-radius:9px;margin-bottom:12px;overflow:hidden}
+.bcard{border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden;
+       box-shadow:var(--sh-1)}
 .bcard>.h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
-          padding:10px 14px;background:#fcfdfe;border-bottom:1px solid var(--line)}
+          padding:10px 14px;background:var(--soft);border-bottom:1px solid var(--line)}
 .bcard>.h .t{font-size:12px;font-weight:600;color:var(--snu-dark);min-width:52px}
 .bcard>.h label{font-size:11.5px;color:var(--muted)}
-.bcard>.h select{font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:5px}
+.bcard>.h select{font-size:12px;padding:5px 26px 5px 9px;border:1px solid var(--field);
+                 border-radius:7px;width:auto;min-width:112px;
+                 background-position:right 8px center}
 .bcard>.b{padding:12px 14px}
 .bcard .rm{margin-left:auto;font-size:11.5px;color:var(--fail);background:none;
-           border:1px solid var(--line);border-radius:5px;padding:3px 9px;cursor:pointer}
+           border:1px solid var(--line);border-radius:7px;padding:4px 10px;cursor:pointer;
+           transition:background .12s,border-color .12s}
+.bcard .rm:hover:not([disabled]){background:var(--danger-bg);border-color:var(--danger-line)}
 .bcard .rm[disabled]{color:var(--muted);cursor:not-allowed}
 .grp-h{display:flex;align-items:baseline;gap:9px;margin:16px 0 8px;
        font-size:12.5px;font-weight:600;color:var(--snu-dark)}
@@ -179,8 +221,8 @@ td.mono{font-family:var(--mono);font-size:12px}
           border-top:1px dotted var(--line);font-size:12.5px}
 .constrow:first-child{border-top:0}
 .constrow .k{font-family:var(--mono);font-weight:600;color:var(--snu-dark);font-size:12px}
-.constrow .v{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:#1f2937}
-.constrow .c{color:var(--muted);font-size:12px;margin-top:2px;font-family:var(--sans)}
+.constrow .v{font-family:var(--mono);font-size:11.5px;word-break:break-all;color:var(--ink)}
+.constrow .c{color:var(--ink-2);font-size:12px;margin-top:2px;font-family:var(--sans)}
 @media(max-width:700px){.constrow{grid-template-columns:1fr;gap:2px}}
 footer{text-align:center;font-size:11.5px;color:var(--muted);padding:0 0 30px}
 .hidden{display:none!important}
@@ -603,7 +645,8 @@ function buildDesignForm(){
     '<div class="chk" style="margin-top:' + gap + 'px">' +
     '<input type="checkbox" id="dz_' + k + '"' + (byKey[k].default ? " checked" : "") +
     '><label for="dz_' + k + '">' + esc(byKey[k].label) +
-    (withDesc ? " &mdash; " + esc(byKey[k].desc) : "") + "</label></div>";
+    (withDesc ? '<span class="cdesc">&mdash; ' + esc(byKey[k].desc) + "</span>" : "") +
+    "</label></div>";
 
   let h = '<div class="grp"><h3>Fragment PCR 구성</h3><div class="grid">';
   ["f1_for_mode","f1_rev_mode","f2_for_mode","f2_rev_mode","f3_for_mode","f3_rev_mode"]
