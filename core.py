@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.3"
+CORE_VERSION = "2.4"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -1015,6 +1015,71 @@ def score_group(r, group, primers, cfg, chain=None):
             "ok": best <= cfg["primer_max_mismatch"]}
 
 
+# call_one 이 실제로 채점하는 그룹. 나머지 두 그룹의 모호성은 판정을 가르지 않습니다.
+SCORED_GROUPS = ("F1_For", "F2_Rev", "F3_For", "F3_Rev")
+
+
+def primer_ambiguity(primers, cfg):
+    """판별구간이 서로 겹쳐 동점이 날 수 있는 프라이머 쌍을 프라이머 FASTA 에서 계산한다.
+
+    같은 group·chain 안의 모든 쌍에 대해, 두 판별구간의 축퇴 집합이 서로 겹치지
+    않는 위치("비호환")를 셉니다. 허용 미스매치를 T 라 할 때
+
+      비호환 <= T        certain : 한쪽 프라이머와 같은 read 가 이미 두 프라이머
+                                   모두와 T 안에서 맞으므로 동점이 확실히 가능
+      T < 비호환 <= 2T   split   : read 가 비호환 위치를 두 프라이머에 나눠
+                                   부담하면 동점이 가능 (각각 최대 T 까지)
+
+    2T 를 넘으면 어떤 read 도 두 프라이머 모두와 T 안에서 맞을 수 없습니다.
+    길이가 다른 판별구간은 짧은 쪽까지만 비교하고 truncated 로 표시합니다.
+    """
+    tol = cfg["primer_max_mismatch"]
+    buckets = {}
+    for p in primers:
+        if p["group"] in ANALYSIS_GROUPS:
+            buckets.setdefault((p["group"], p["chain"]), []).append(p)
+    out = []
+    for (group, chain), plist in buckets.items():
+        for i in range(len(plist)):
+            for j in range(i + 1, len(plist)):
+                a, b = plist[i], plist[j]
+                ca, cb = a["core"], b["core"]
+                n = min(len(ca), len(cb))
+                bad = sum(1 for k in range(n)
+                          if not (set(IUPAC.get(ca[k], ca[k]))
+                                  & set(IUPAC.get(cb[k], cb[k]))))
+                if bad > 2 * tol:
+                    continue
+                fams = sorted(set(a["families"]) | set(b["families"]))
+                out.append({
+                    "group": group, "chain": chain,
+                    "a": a["name"], "b": b["name"],
+                    "families_a": list(a["families"]), "families_b": list(b["families"]),
+                    "families": fams,
+                    # 같은 family 면 이름만 모호하고 family 는 확정됩니다.
+                    # 다르면 family 자체가 모호해져 판정의 뜻이 달라집니다.
+                    "same_family": len(fams) == 1,
+                    "cmp_len": n, "len_a": len(ca), "len_b": len(cb),
+                    "truncated": len(ca) != len(cb),
+                    "incompatible": bad,
+                    "tie": "certain" if bad <= tol else "split",
+                    "scored": group in SCORED_GROUPS,
+                })
+    out.sort(key=lambda d: (d["tie"] != "certain", d["same_family"],
+                            d["group"], d["chain"], d["a"], d["b"]))
+    return out
+
+
+def ambiguity_summary(pairs):
+    """primer_ambiguity 결과를 시트 한 줄로 줄인 요약."""
+    cert = [p for p in pairs if p["tie"] == "certain"]
+    split = [p for p in pairs if p["tie"] == "split"]
+    cross = [p for p in pairs if not p["same_family"]]
+    return {"total": len(pairs), "certain": len(cert), "split": len(split),
+            "same_family": len(pairs) - len(cross), "cross_family": len(cross),
+            "cross_scored": [p for p in cross if p["scored"]]}
+
+
 def fmt_call(call, short=False):
     if call is None:
         return "-"
@@ -1238,7 +1303,36 @@ def compose(primer_results, cfg):
 # =============================================================================
 #  11. 용어 설명  (xlsx 06_용어설명 시트 내용)
 # =============================================================================
-def glossary():
+def fmt_ambiguity_pair(p):
+    return "%s/%s (%s, k%d)" % (p["a"], p["b"], "|".join(p["families"]), p["incompatible"])
+
+
+def _ambiguity_doc(primers, cfg):
+    """모호성 클러스터 설명을 프라이머 FASTA 에서 계산해 만든다. 이름 하드코딩 없음."""
+    if not primers or not cfg:
+        return ("프라이머 FASTA 를 읽어야 계산됩니다. 이 실행에는 프라이머가 없어 "
+                "모호성 쌍을 계산하지 못했습니다.")
+    pairs = primer_ambiguity(primers, cfg)
+    s = ambiguity_summary(pairs)
+    combos = sorted(set("|".join(p["families"]) for p in pairs
+                        if not p["same_family"] and p["scored"]
+                        and p["tie"] == "certain"))
+    return ("프라이머 FASTA 에서 실행 시마다 계산합니다. 같은 group·chain 안에서 판별구간의 "
+            "축퇴 집합이 겹쳐 한 read 가 두 프라이머 모두와 허용 미스매치 %d 안에서 맞을 수 "
+            "있는 쌍입니다. 프라이머 %d 종에서 certain %d 쌍(같은 family %d · 다른 family %d), "
+            "split %d 쌍(같은 family %d · 다른 family %d)이 나옵니다. 등급의 뜻은 '모호성 등급' "
+            "항목을, 전체 목록은 05_실행설정의 '모호성' 행을 보세요. 채점 그룹(%s)에서 "
+            "certain 등급으로 혼동될 수 있는 family 조합은 %s 입니다."
+            % (cfg["primer_max_mismatch"], len(primers),
+               s["certain"], sum(1 for p in pairs if p["tie"] == "certain" and p["same_family"]),
+               sum(1 for p in pairs if p["tie"] == "certain" and not p["same_family"]),
+               s["split"], sum(1 for p in pairs if p["tie"] == "split" and p["same_family"]),
+               sum(1 for p in pairs if p["tie"] == "split" and not p["same_family"]),
+               ", ".join(SCORED_GROUPS),
+               " · ".join(combos) if combos else "없음"))
+
+
+def glossary(primers=None, cfg=None):
     L = CONST["QC2"]
     sev3 = ", ".join(sev_flags(3))
     sev2 = ", ".join(sev_flags(2))
@@ -1331,10 +1425,19 @@ def glossary():
          "겹쳐 서로 구분할 수 없는 프라이머 후보 집합입니다. 하나로 골라 적는 것은 근거 없는 "
          "정보이므로 하지 않습니다. family 칸의 JH1|JH2 처럼 프라이머 하나가 여러 germline 을 "
          "표적하는 경우도 같은 기호를 쓰지만, 이때 후보 프라이머는 1 개입니다."],
-        ["프라이머 판별", "모호성 클러스터",
-         "For3-k-1/2/5/6 (전부 IGKV1), For3-k-8/9/12 (전부 IGKV2), For3-L-5/6 (IGLV2), "
-         "For3-L-8/9 (IGLV3), For-1-3b/3c (VH3). 다섯 클러스터 모두 같은 family 안에서만 겹치므로 "
-         "프라이머 이름이 모호해도 family 는 항상 유일하게 확정됩니다."],
+        ["프라이머 판별", "모호성 클러스터", _ambiguity_doc(primers, cfg)],
+        ["프라이머 판별", "모호성 등급 certain / split",
+         "비호환 위치 수 k 와 허용 미스매치 T 로 나눕니다. certain (k <= T) 은 한쪽 "
+         "프라이머와 완전히 같은 read 가 다른 쪽과도 허용 범위 안에 들어, 동점이 "
+         "일상적으로 발생합니다. split (T < k <= 2T) 은 read 가 양쪽 프라이머 모두에서 "
+         "벗어날 때만 동점이 되므로 가능하지만 조건부입니다. k > 2T 면 어떤 read 도 두 "
+         "프라이머 모두와 허용 범위 안에서 맞을 수 없어 동점이 불가능합니다."],
+        ["프라이머 판별", "모호성 · family 가 다른 쌍",
+         "같은 family 안의 동점은 프라이머 이름만 모호하고 판정되는 family 는 확정됩니다. "
+         "family 가 다른 동점은 판정 자체가 갈립니다 — 결과에 VH4|VH6 처럼 여러 family 가 "
+         "함께 적히고, 어느 쪽인지는 이 판별만으로 결정할 수 없습니다. 이런 쌍이 있는지, "
+         "어느 조합인지는 프라이머 FASTA 마다 다르므로 실행 시 계산해 05_실행설정에 "
+         "기록합니다."],
         ["프라이머 판별", "그룹 F1_For", "VH FR1. NotI 를 앵커로 위치를 잡습니다. 판별 신뢰도 높음."],
         ["프라이머 판별", "그룹 F2_Rev", "JH + 링커. 링커 시작을 앵커로 잡는 역방향 프라이머. 신뢰도 높음."],
         ["프라이머 판별", "그룹 F3_For",
@@ -1526,10 +1629,10 @@ def build_summary(qc_results, calls, cfg, meta=None):
     return rows
 
 
-def build_sheets(qc_results, calls, cfg, comp, meta):
+def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
     """xlsx 시트 데이터를 순서대로 담은 리스트를 반환한다."""
     if cfg.get("analysis_mode") == MODE_NEGCTRL:
-        return build_negctrl_sheets(qc_results, cfg, meta)
+        return build_negctrl_sheets(qc_results, cfg, meta, primers)
     by_id = {p["id"]: p for p in calls}
     sheets = []
 
@@ -1613,8 +1716,8 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
         "title": "04_배치조성", "headers": h4, "rows": r4, "wrap": [3], "maxw": 60,
         "note": "구조QC 와 프라이머 판별을 모두 통과한 클론만 집계합니다."})
 
-    sheets.append(_sheet_config(cfg, meta, "05_실행설정"))
-    sheets.append(_sheet_glossary("06_용어설명"))
+    sheets.append(_sheet_config(cfg, meta, "05_실행설정", primers))
+    sheets.append(_sheet_glossary("06_용어설명", primers, cfg))
 
     # 07 서열
     h7 = ["clone", "최종판정", "인서트 길이(bp)", "인서트 염기서열 (NotI~AscI)",
@@ -1664,14 +1767,14 @@ def _sheet_struct_qc(qc_results, title):
                     "(OK / S#G# / GAP# / ABSENT / NA)는 용어설명 시트 참조."}
 
 
-def _sheet_glossary(title):
+def _sheet_glossary(title, primers=None, cfg=None):
     return {"title": title, "headers": ["구분", "용어 / 컬럼", "설명"],
-            "rows": glossary(), "wrap": [2], "maxw": 110,
+            "rows": glossary(primers, cfg), "wrap": [2], "maxw": 110,
             "note": "이 도구를 처음 보는 사람도 이 시트만으로 모든 컬럼과 판정을 "
                     "이해할 수 있도록 정리했습니다."}
 
 
-def _sheet_config(cfg, meta, title):
+def _sheet_config(cfg, meta, title, primers=None):
     h5 = ["구분", "항목", "값", "기본값", "기본값과 동일", "설명"]
     r5 = [["실행", "core 버전", cfg["core_version"], "", "", "기준 노트북 v" + cfg["nb_version"]],
           ["실행", "실행 환경", meta.get("runtime", ""), "", "", ""],
@@ -1685,6 +1788,19 @@ def _sheet_config(cfg, meta, title):
           ["실행", "프라이머 FASTA", meta.get("primer_file", ""), "", "",
            "%d 종" % meta.get("primer_n", 0)],
           ["실행", "입력 파일", ", ".join(meta.get("files", [])), "", "", ""]]
+    amb = primer_ambiguity(primers, cfg) if primers else []
+    if primers:
+        s = ambiguity_summary(amb)
+        r5.append(["실행", "모호성 쌍",
+                   "%d 건 (certain %d · split %d)" % (s["total"], s["certain"], s["split"]),
+                   "", "",
+                   "같은 family %d · 다른 family %d. 판별구간이 겹쳐 한 read 가 두 "
+                   "프라이머 모두와 허용 미스매치 안에서 맞을 수 있는 쌍입니다. "
+                   "등급의 뜻은 용어설명 참조." % (s["same_family"], s["cross_family"])])
+        for tier in ("certain", "split"):
+            sub = [p for p in amb if p["tie"] == tier and not p["same_family"]]
+            r5.append(["실행", "모호성 · family 다름 (%s)" % tier, "%d 건" % len(sub), "", "",
+                       " · ".join(fmt_ambiguity_pair(p) for p in sub) or "없음"])
     for k, lab, memo in DESIGN_DOC:
         if k in RNA_KEYS:
             continue          # 아래 "RNA 출처" 한 행이 두 값을 합쳐 보여준다
@@ -1820,7 +1936,7 @@ def negctrl_summary(qc_results, cfg):
             "fingerprints": sorted(set(c["insert_md5"] for c in clones if c["insert_md5"]))}
 
 
-def build_negctrl_sheets(qc_results, cfg, meta):
+def build_negctrl_sheets(qc_results, cfg, meta, primers=None):
     """대조군 워크북. 프라이머 판별과 배치 조성은 인서트가 scFv 가 아니라 뺍니다."""
     neg = negctrl_summary(qc_results, cfg)
     by_id = dict((c["id"], c) for c in neg["clones"])
@@ -1859,8 +1975,8 @@ def build_negctrl_sheets(qc_results, cfg, meta):
                    "note": "관측 사실만 적습니다. 비율·배경률 추정과 해석은 "
                            "넣지 않았습니다."})
 
-    sheets.append(_sheet_config(cfg, meta, "04_실행설정"))
-    sheets.append(_sheet_glossary("05_용어설명"))
+    sheets.append(_sheet_config(cfg, meta, "04_실행설정", primers))
+    sheets.append(_sheet_glossary("05_용어설명", primers, cfg))
 
     h6 = ["clone", "판정", "인서트 길이(bp)", "인서트 염기서열 (NotI~AscI)", "인서트 md5"]
     r6 = [[r["id"], by_id[r["id"]]["verdict"], r["insert_bp"], insert_seq(r),
@@ -1991,7 +2107,7 @@ def analyze(files, primer_text="", overrides=None, meta=None):
     meta.setdefault("primer_file", meta.get("primer_file", ""))
     meta["primer_n"] = len(primers)
     meta["files"] = [r["filename"] for r in reads]
-    sheets = build_sheets(qc_results, calls, cfg, comp, meta)
+    sheets = build_sheets(qc_results, calls, cfg, comp, meta, primers)
     summary_rows = sheets[0]["rows"]
 
     pub_qc = []

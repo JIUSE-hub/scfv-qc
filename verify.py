@@ -64,7 +64,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.3"
+VERIFY_VERSION = "2.4"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -857,6 +857,42 @@ def check_analysis_mode(report, core):
               " / ".join(bad))
 
 
+def check_ambiguity_runtime(report, core):
+    """모호성 항목이 프라이머 이름을 하드코딩하고 있지 않은가.
+
+    프라이머가 없을 때의 용어설명에 프라이머 이름이 남아 있으면 런타임 계산이
+    아니라 코드에 박아둔 것입니다. 프라이머를 넣었을 때만 이름이 나와야 합니다.
+    """
+    # 이번 이슈의 대상은 "모호성 클러스터" 항목입니다. 같은 구분의 다른 항목
+    # (Δ · 모호성 표기 · CDR3 경계 · Over 프라이머)은 프라이머 이름을 예시로
+    # 인용하고 있고 그건 별개 사안이라 여기서 보지 않습니다.
+    TARGET = "모호성 클러스터"
+    empty = [d for _c, t, d in core.glossary() if t == TARGET]
+    names = set()
+    src = os.path.join(ROOT, TESTDATA, "scFv_primers.fa")
+    pairs = []
+    if os.path.isfile(src):
+        with io.open(src, encoding="utf-8", errors="ignore") as fh:
+            primers, _t, _w = core.parse_primer_fasta(fh.read())
+        names = set(p["name"] for p in primers)
+        cfg = core.build_config(None, [])
+        pairs = core.primer_ambiguity(primers, cfg)
+    leaked = sorted(n for n in names if any(n in d for d in empty))
+    bad = []
+    if leaked:
+        bad.append("프라이머 없이 만든 용어설명에 이름이 남아 있음: " +
+                   ", ".join(leaked[:6]))
+    if names and not pairs:
+        bad.append("프라이머를 넣어도 모호성 쌍이 하나도 계산되지 않았습니다")
+    if names:
+        filled = [d for _c, t, d in core.glossary(primers, cfg) if t == TARGET]
+        if filled and not any(ch.isdigit() for ch in filled[0]):
+            bad.append("계산된 용어설명에 수치가 없습니다")
+    report.ok("B", "모호성 항목이 런타임 계산인가", not bad,
+              "프라이머 없이는 이름 0 건 · 넣으면 %d 쌍 계산" % len(pairs),
+              " / ".join(bad))
+
+
 def check_negctrl_vocab(report, core, html):
     """대조군 verdict 가 전부 용어설명과 index.html badge 에서 처리되는가."""
     verdicts = list(core.NEGCTRL_VERDICTS)
@@ -1462,6 +1498,71 @@ def badge_class(body, s):
 BADGE_LABEL = "badge() 표시값 %d 종" % len(BADGE_EXPECT)
 
 
+def check_ambiguity_units(report, core):
+    """primer_ambiguity 단위시험. 비호환 위치 수를 0~3 으로 만들어 등급을 확인합니다."""
+    cfg = core.build_config(None, [])
+    tol = cfg["primer_max_mismatch"]
+    base = "ACGTACGTACGTACGTACGTAC"      # 판별구간 22 nt
+    swap = {"A": "C", "C": "A", "G": "T", "T": "G"}
+
+    def mk(name, seq, fam):
+        return {"name": name, "seq": seq, "core": seq, "core_trim": 0,
+                "len": len(seq), "group": "F1_For", "chain": "heavy",
+                "family": fam, "families": [fam], "target": "", "fragment": "",
+                "dir": "", "tm": ""}
+
+    def mutate(n):
+        b = list(base)
+        for i in range(n):
+            b[i * 3] = swap[b[i * 3]]
+        return "".join(b)
+
+    bad = []
+    for n in (0, 1, 2, 3, 4, 5):
+        pairs = core.primer_ambiguity([mk("p1", base, "F1"), mk("p2", mutate(n), "F1")], cfg)
+        want_in = n <= 2 * tol
+        if bool(pairs) != want_in:
+            bad.append("비호환 %d 이 %s" % (n, "빠짐" if want_in else "포함됨"))
+            continue
+        if not pairs:
+            continue
+        p = pairs[0]
+        if p["incompatible"] != n:
+            bad.append("비호환 %d 인데 %d 로 셈" % (n, p["incompatible"]))
+        want_tier = "certain" if n <= tol else "split"
+        if p["tie"] != want_tier:
+            bad.append("비호환 %d 등급 %s (기대 %s)" % (n, p["tie"], want_tier))
+
+    # 길이가 다르면 짧은 쪽까지만 비교하고 truncated 로 표시
+    long_p = mk("p3", base + "GGGGG", "F1")
+    pairs = core.primer_ambiguity([mk("p1", base, "F1"), long_p], cfg)
+    if not pairs:
+        bad.append("길이 다른 쌍이 빠짐")
+    else:
+        p = pairs[0]
+        if p["cmp_len"] != len(base) or not p["truncated"] or p["incompatible"] != 0:
+            bad.append("길이 다름: cmp_len %d truncated %s 비호환 %d"
+                       % (p["cmp_len"], p["truncated"], p["incompatible"]))
+
+    # family 가 다르면 same_family 가 False
+    pairs = core.primer_ambiguity([mk("p1", base, "F1"), mk("p2", base, "F2")], cfg)
+    if not pairs or pairs[0]["same_family"] or pairs[0]["families"] != ["F1", "F2"]:
+        bad.append("family 다른 쌍을 same_family 로 봄")
+
+    # 부분적으로 겹치는 경우 (예: JH1|JH2 대 JH2). 보고되는 family 는 합집합이라
+    # 유일하지 않습니다. 교집합으로 판단하면 이 경우를 같은 family 로 잘못 봅니다.
+    p1, p2 = mk("p1", base, "F1"), mk("p2", base, "F2")
+    p1["families"], p2["families"] = ["F1", "F2"], ["F2"]
+    pairs = core.primer_ambiguity([p1, p2], cfg)
+    if not pairs or pairs[0]["same_family"] or pairs[0]["families"] != ["F1", "F2"]:
+        bad.append("family 부분 겹침을 same_family 로 봄")
+
+    report.ok("E", "primer_ambiguity 단위", not bad,
+              "비호환 0~%d certain · %d~%d split · %d 초과 제외 · 길이 다르면 짧은 쪽까지"
+              % (tol, tol + 1, 2 * tol, 2 * tol),
+              " / ".join(bad))
+
+
 def check_badge_states(report, js):
     body = js_function_body(js, "badge")
     if body is None:
@@ -1921,6 +2022,8 @@ def main():
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
         guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
         guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
+        guard(report, "B", "모호성 항목이 런타임 계산인가",
+              check_ambiguity_runtime, report, core)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
         guard(report, "B", "FLAG_SEV 대 qc_one 의 실제 플래그",
@@ -1945,6 +2048,7 @@ def main():
         guard(report, "E", "check_landmark 단위", check_landmark_units, report, core)
         guard(report, "E", "스터퍼 길이 판정 단위", check_stuffer_units, report, core)
         guard(report, "E", "대조군 판정 분기 단위", check_negctrl_units, report, core)
+        guard(report, "E", "primer_ambiguity 단위", check_ambiguity_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 
