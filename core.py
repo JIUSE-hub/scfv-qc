@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "3.2"
+CORE_VERSION = "3.3"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -185,6 +185,7 @@ CFG_DOC = {
 NOSEL = "(지정 안 함)"
 POOL_OPTS = ["분리", "pool"]
 CDNA_OPTS = ["oligo(dT)", "random hexamer", "혼합/불명"]
+RNA_SOURCE_OPTS = ["Bone marrow", "Peripheral leukocytes", "Other library"]
 
 # 분석 모드. 라이브러리를 만드는 중에는 VH·VL 을 아는 배치를 검증하고(assigned),
 # 완성 후에는 지정 없이 라이브러리 전체를 판정합니다(library).
@@ -208,15 +209,17 @@ DESIGN_DEFAULTS = [
     ("cdna_frag1", "oligo(dT)"),
     ("cdna_frag2", "oligo(dT)"),
     ("cdna_frag3", "oligo(dT)"),
-    ("rna_bone_marrow", True),
-    ("rna_peripheral", True),
+    ("rna_frag1", "Bone marrow"),
+    ("rna_frag2", "Bone marrow"),
+    ("rna_frag3", "Bone marrow"),
 ]
 DESIGN_KEYS = [k for k, _v in DESIGN_DEFAULTS]
 DESIGN_DEFAULT_MAP = dict(DESIGN_DEFAULTS)
 
-# 05_실행설정에서는 아래 두 키를 개별 행으로 내지 않고 cfg["rna_source"] 로 합쳐
-# 한 행에 씁니다. 합친 문자열이 두 값의 네 조합을 모두 구분하므로 정보 손실이 없습니다.
-RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
+# 05_실행설정에서는 아래 세 키를 개별 행으로 내지 않고 cfg["rna_source"] 로 합쳐
+# 한 행에 씁니다. 합친 문자열이 3 x 3 x 3 = 27 조합을 모두 구분하므로 정보 손실이
+# 없습니다 (verify.py [E] 가 전수로 확인합니다).
+RNA_KEYS = ("rna_frag1", "rna_frag2", "rna_frag3")
 
 # 설계 항목 중 판정 분기를 실제로 만드는 것만 모읍니다. design_hash 의 대상입니다.
 #   analysis_mode
@@ -232,7 +235,7 @@ RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
 #       f1_rev_mode, f2_rev_mode, f3_for_mode, f3_rev_mode,
 #       f3_product_pooled, cdna_frag1~3
 #   읽히지만 판정 분기가 아님 :
-#       rna_bone_marrow, rna_peripheral — build_config 에서 rna_source
+#       rna_frag1, rna_frag2, rna_frag3 — build_config 에서 rna_source
 #       표시 문자열을 조립할 때만 쓰인다.
 JUDGMENT_DESIGN_KEYS = ["analysis_mode", "batch_vh_family", "batch_chain",
                         "f1_for_mode", "f2_for_mode"]
@@ -254,8 +257,9 @@ DESIGN_DOC = [
     ("cdna_frag1", "Fragment 1 cDNA", "판정에 미사용. 기록용"),
     ("cdna_frag2", "Fragment 2 cDNA", "판정에 미사용. 기록용"),
     ("cdna_frag3", "Fragment 3 cDNA", "판정에 미사용. 기록용"),
-    ("rna_bone_marrow", "RNA 출처 · Bone marrow", "판정에 미사용. 기록용"),
-    ("rna_peripheral", "RNA 출처 · Peripheral leukocytes", "판정에 미사용. 기록용"),
+    ("rna_frag1", "Fragment 1 RNA 출처", "판정에 미사용. 기록용. Other library = 다른 라이브러리를 주형으로 PCR"),
+    ("rna_frag2", "Fragment 2 RNA 출처", "판정에 미사용. 기록용. Other library = 다른 라이브러리를 주형으로 PCR"),
+    ("rna_frag3", "Fragment 3 RNA 출처", "판정에 미사용. 기록용. Other library = 다른 라이브러리를 주형으로 PCR"),
 ]
 
 
@@ -571,12 +575,12 @@ def build_config(overrides=None, batches=None):
         d = DESIGN_DEFAULT_MAP[k]
         cfg[k] = _coerce(ov[k], d) if k in ov and ov[k] is not None else d
 
-    src = []
-    if cfg["rna_bone_marrow"]:
-        src.append("Bone marrow")
-    if cfg["rna_peripheral"]:
-        src.append("Peripheral leukocytes")
-    cfg["rna_source"] = " + ".join(src)
+    # fragment 마다 다른 주형을 쓸 수 있습니다. 셋이 같으면 그 값 하나로 적고,
+    # 다르면 fragment 별로 적습니다. 27 조합이 서로 다른 문자열이 되므로 이 한 줄이
+    # 개별 세 값을 완전히 결정합니다.
+    rna = [cfg[k] for k in RNA_KEYS]
+    cfg["rna_source"] = (rna[0] if rna[0] == rna[1] == rna[2] else
+                         "frag1 %s / frag2 %s / frag3 %s" % tuple(rna))
     cfg["batches"] = list(batches or [])
     cfg["nb_version"] = NB_VERSION
     cfg["core_version"] = CORE_VERSION
@@ -2361,7 +2365,8 @@ def _sheet_config(cfg, meta, title, primers=None):
             continue          # 아래 "RNA 출처" 한 행이 두 값을 합쳐 보여준다
         r5.append(["실험 설계", lab, cfg[k], "", "", memo])
     r5.append(["실험 설계", "RNA 출처", cfg["rna_source"] or "(미지정)", "", "",
-               "판정에 미사용. 기록용. 선택한 RNA 출처를 합친 값"])
+               "판정에 미사용. 기록용. fragment 3 개의 RNA 출처를 합친 값. "
+               "셋이 같으면 그 값 하나, 다르면 fragment 별로 적는다"])
     for k in THRESH_KEYS:
         r5.append(["판정 임계값", CFG_DOC[k][0], cfg[k], CFG_DEFAULT_MAP[k],
                    "O" if cfg[k] == CFG_DEFAULT_MAP[k] else "X  <-- 변경됨",

@@ -378,7 +378,8 @@ def js_docs():
         "design": [{"key": k, "label": lab, "desc": memo,
                     "default": core.DESIGN_DEFAULT_MAP[k]}
                    for k, lab, memo in core.DESIGN_DOC],
-        "poolOpts": core.POOL_OPTS, "cdnaOpts": core.CDNA_OPTS, "nosel": core.NOSEL,
+        "poolOpts": core.POOL_OPTS, "cdnaOpts": core.CDNA_OPTS,
+        "rnaOpts": core.RNA_SOURCE_OPTS, "nosel": core.NOSEL,
         # core.MODE_OPTS 의 순서를 그대로 씁니다. [0] 배치 지정, [1] 라이브러리 전체.
         # 순서가 뒤집히면 verify.py 의 [B] 가 잡습니다.
         "modeOpts": list(core.MODE_OPTS),
@@ -621,12 +622,15 @@ function buildDesignForm(){
 
   h += '<div class="grp"><h3>cDNA 합성 / RNA 출처</h3>' +
     '<div class="note">판정에는 쓰이지 않고 결과 파일에 기록만 됩니다.</div><div class="grid">';
+  // 선택지도 라벨도 기본값도 전부 core.py 에서 온다.
+  const selHTML = (k, opts) => '<select id="dz_' + k + '">' + opts.map(o =>
+    '<option' + (o === byKey[k].default ? " selected" : "") + ">" + esc(o) +
+    "</option>").join("") + "</select>";
   ["cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k =>
-    h += fld(k, '<select id="dz_' + k + '">' + DOC.cdnaOpts.map(o =>
-      '<option' + (o === byKey[k].default ? " selected" : "") + ">" + esc(o) +
-      "</option>").join("") + "</select>"));
-  h += "</div>" + chk("rna_bone_marrow", 12, false) +
-    chk("rna_peripheral", 6, false) + "</div>";
+    h += fld(k, selHTML(k, DOC.cdnaOpts)));
+  ["rna_frag1","rna_frag2","rna_frag3"].forEach(k =>
+    h += fld(k, selHTML(k, DOC.rnaOpts)));
+  h += "</div></div>";
 
   const p = $("#pDesign"); p.innerHTML = h;
   p.querySelectorAll(".seg button").forEach(b => b.addEventListener("click", () => {
@@ -647,9 +651,9 @@ function readConfig(){
     const on = s.querySelector("button.on");
     cfg[s.dataset.key] = on ? on.dataset.v : null;
   });
-  ["f3_product_pooled","rna_bone_marrow","rna_peripheral"].forEach(k =>
-    cfg[k] = $("#dz_" + k).checked);
-  ["cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k => cfg[k] = $("#dz_" + k).value);
+  ["f3_product_pooled"].forEach(k => cfg[k] = $("#dz_" + k).checked);
+  ["cdna_frag1","cdna_frag2","cdna_frag3",
+   "rna_frag1","rna_frag2","rna_frag3"].forEach(k => cfg[k] = $("#dz_" + k).value);
   // batch_vh_family / batch_chain 은 배치 카드에서 정해 js_analyze_batches 가 넣습니다.
   cfg["analysis_mode"] = DOC.modeOpts[modeIdx];
   return cfg;

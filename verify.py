@@ -55,6 +55,7 @@ import ast
 import builtins
 import hashlib
 import io
+import itertools
 import os
 import re
 import shutil
@@ -66,7 +67,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.4"
+VERIFY_VERSION = "3.5"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -77,6 +78,9 @@ TESTDATA = "testdata"
 # 이슈 3 해결로 비었습니다. DESIGN_DEFAULTS 와 DESIGN_DOC 의 키는 이제 완전히
 # 일치해야 하며, 하나라도 어긋나면 실패합니다.
 KNOWN_DESIGN_DOC_GAP = set()
+# 키 집합만 대조하면 DEFAULTS 와 DOC 에서 같은 키가 함께 사라져도 통과합니다.
+# 개수를 못 박아 그 경우를 잡습니다.
+DESIGN_KEY_COUNT = 16
 
 # --- [C] 서열이 아니라 문자 클래스이므로 제외 --------------------------------
 MARKSEQ_REGEX = r"/\b[ACGT]{8,}\b/g"
@@ -735,24 +739,66 @@ def check_js_keys(report, js, core, keyset, doc_keys, doc_sub):
 GLUE_SUPPLIED_KEYS = ("batch_vh_family", "batch_chain")
 
 
+def _form_key_arrays(js):
+    """buildDesignForm 의 [키 목록].forEach(...) 를 렌더링 수단별로 가른다.
+
+    반환 (seg, dz) - seg 는 .seg 버튼, dz 는 id="dz_<key>" 인 입력입니다.
+    readConfig 는 앞은 s.dataset.key 로 일괄로, 뒤는 이름으로 하나씩 읽습니다.
+    """
+    body = js_function_body(js, "buildDesignForm") or ""
+    seg, dz = set(), set()
+    for m in re.finditer(r"\[([^\]]*)\]\s*\n?\s*\.forEach\(", body):
+        stmt = body[m.end():m.end() + 240].split(";")[0]
+        keys = set(re.findall(r"[\"']([A-Za-z0-9_]+)[\"']", m.group(1)))
+        if "segHTML" in stmt:
+            seg |= keys
+        elif "selHTML" in stmt or "dz_" in stmt:
+            dz |= keys
+    # chk("key", ...) 로 하나씩 그리는 체크박스도 id 로 읽힙니다.
+    dz |= set(re.findall(r"chk\(\s*[\"']([A-Za-z0-9_]+)[\"']", body))
+    return seg, dz
+
+
+def seg_keys_in_form(js):
+    """buildDesignForm 이 .seg 버튼으로 렌더링하는 키.
+
+    readConfig 는 이들을 s.dataset.key 로 한꺼번에 읽으므로 이름이 readConfig 에
+    없어도 됩니다. 그 면제는 여기서 걸러낸 키에만 줍니다 - 나머지는 readConfig 가
+    #dz_<key> 로 하나씩 읽으므로 readConfig 안에 이름이 있어야 합니다.
+    """
+    return _form_key_arrays(js)[0]
+
+
 def check_readconfig_covers_design(report, js, core, glue=""):
-    """설계 키가 index.html 을 통해 core 까지 전달되는가."""
+    """설계 키가 index.html 을 통해 core 까지 전달되는가.
+
+    cfg 를 채우는 것은 readConfig 이므로 이름의 근거도 readConfig 에서 찾습니다.
+    buildDesignForm 에 이름이 있다는 것만으로는 그 키가 cfg 에 실린다는 보장이
+    없습니다 - 화면에는 뜨는데 전달은 안 되는 상태가 그렇습니다.
+    """
     need = [k for k in core.DESIGN_KEYS if k not in GLUE_SUPPLIED_KEYS]
-    parts, source = [], []
-    for fname in ("buildDesignForm", "readConfig"):
-        body = js_function_body(js, fname)
-        if body is None:
-            continue
-        parts.append(body)
-        source.append(fname)
-    if not parts:
-        parts, source = [js], ["script 전체 (함수 추출 실패)"]
-    literal = set(js_strings("\n".join(parts)))
+    rc = js_function_body(js, "readConfig")
+    if rc is None:
+        rc, source = js, ["script 전체 (readConfig 추출 실패)"]
+    else:
+        source = ["readConfig"]
+    literal = set(js_strings(rc))
+    # .seg 는 이름 없이 일괄로 읽히므로 예외입니다. readConfig 가 실제로 그
+    # 일괄 대입을 하고 있을 때만 인정합니다.
+    overlap = []
+    if re.search(r"cfg\[\s*s\.dataset\.key\s*\]\s*=[^=]", rc):
+        seg, dz = _form_key_arrays(js)
+        # 한 키는 dataset.key 로 읽히거나 dz_ id 로 읽히거나 둘 중 하나입니다.
+        # 겹치면 면제 범위가 넓어져 검사가 조용히 무력해지므로 그것부터 봅니다.
+        overlap = sorted(seg & dz)
+        if seg and not overlap:
+            literal |= seg
+            source.append("buildDesignForm 의 .seg %d 키" % len(seg))
     dynamic = set()
     # cfg 를 채우는 것은 readConfig 이므로, 동적 생성 인정은 readConfig 가 직접
     # DOC.design 을 순회할 때만 합니다. buildDesignForm 이 조회 테이블을 만드느라
     # DOC.design 을 읽는 것만으로는 그 키가 cfg 에 실린다는 보장이 없습니다.
-    if re.search(r"DOC\.design", js_function_body(js, "readConfig") or ""):
+    if re.search(r"DOC\.design", rc):
         dynamic = set(k for k, _lab, _memo in core.DESIGN_DOC)
     gone = [k for k in need if k not in (literal | dynamic)]
 
@@ -762,11 +808,14 @@ def check_readconfig_covers_design(report, js, core, glue=""):
             if k in core.DESIGN_KEYS and not re.search(
                 r"cfg\[\s*[\"']" + re.escape(k) + r"[\"']\s*\]\s*=[^=]", glue or "")]
 
-    report.ok("B", "readConfig 가 DESIGN_KEYS 를 덮는가", not gone and not miss,
-              "readConfig %d 키 (근거 %s) + GLUE %d 키"
+    report.ok("B", "readConfig 가 DESIGN_KEYS 를 덮는가",
+              not gone and not miss and not overlap,
+              "%d 키 (근거 %s) + GLUE %d 키"
               % (len(need), "+".join(source), len(GLUE_SUPPLIED_KEYS)),
-              "readConfig 가 안 보냄: %s / GLUE 가 안 넣음: %s"
-              % (", ".join(gone) or "-", ", ".join(miss) or "-"))
+              "readConfig 가 안 보냄: %s / GLUE 가 안 넣음: %s / "
+              ".seg 와 dz_ 가 겹침: %s"
+              % (", ".join(gone) or "-", ", ".join(miss) or "-",
+                 ", ".join(overlap) or "-"))
 
 
 # 이슈 2 에서 CONST / RULES 로 옮긴 옛 모듈 상수. 이름이 남아 있으면 이동이 덜 끝난 것.
@@ -1052,6 +1101,50 @@ def check_cfg_doc(report, core):
               % (sorted(a - b) or "-", sorted(b - a) or "-"))
 
 
+def check_sheet05_design_rows(report, core):
+    """05_실행설정이 설계 키를 하나도 빠뜨리지 않는가.
+
+    RNA_KEYS 는 개별 행 대신 합계 한 행으로 냅니다. 그 생략이 정당한 것은 합계
+    행이 실제로 있고 값이 cfg["rna_source"] 와 같을 때뿐입니다. 합계 행이 사라지면
+    개별 값이 어디에도 남지 않으므로 그것까지 함께 봅니다.
+
+    기본값은 세 fragment 가 모두 같아 rna_source 가 rna_frag1 과 우연히 일치합니다.
+    그 상태로는 합계 대신 개별 값 하나를 찍어도 구분되지 않으므로, 셋을 서로 다르게
+    지정한 설정으로 시트를 만듭니다.
+    """
+    opts = list(core.RNA_SOURCE_OPTS)
+    ov = dict((k, opts[i % len(opts)]) for i, k in enumerate(core.RNA_KEYS))
+    cfg = core.build_config(ov, [])
+    distinct = len(set(ov.values())) == len(core.RNA_KEYS)
+    sheets = core.build_sheets([], [], cfg, core.compose([], cfg), {})
+    s5 = [x for x in sheets if str(x.get("title", "")).startswith("05")]
+    if not s5:
+        report.add("B", "05_실행설정이 설계 키를 덮는가", FAIL, "05 시트를 찾지 못했습니다")
+        return
+    rows = s5[0]["rows"]
+    design = [r for r in rows if r and r[0] == "실험 설계"]
+    seen = set(str(r[1]) for r in design)
+    bad = []
+    if not distinct:
+        bad.append("선택지가 %d 개뿐이라 세 값을 다르게 못 만듦" % len(opts))
+    for k, lab, _memo in core.DESIGN_DOC:
+        if k in core.RNA_KEYS:
+            continue
+        if lab not in seen:
+            bad.append("%s(%s) 행 없음" % (lab, k))
+    agg = [r for r in design if str(r[1]) == "RNA 출처"]
+    if not agg:
+        bad.append("RNA 출처 합계 행이 없어 %d 개 개별 값이 사라짐" % len(core.RNA_KEYS))
+    elif len(agg) > 1:
+        bad.append("RNA 출처 행이 %d 개" % len(agg))
+    elif str(agg[0][2]) != str(cfg["rna_source"]):
+        bad.append("RNA 출처 값 %r != cfg %r" % (agg[0][2], cfg["rna_source"]))
+    report.ok("B", "05_실행설정이 설계 키를 덮는가", not bad,
+              "설계 %d 행 + RNA 출처 합계 1 행 = DESIGN_DOC %d 키 · 세 값을 다르게 둔 설정"
+              % (len(design) - 1, len(core.DESIGN_DOC)),
+              " / ".join(bad))
+
+
 def check_design_doc(report, core):
     a = [k for k, _v in core.DESIGN_DEFAULTS]
     b = set(k for k, _lab, _memo in core.DESIGN_DOC)
@@ -1066,6 +1159,9 @@ def check_design_doc(report, core):
     elif gap:
         detail = "DEFAULTS %d · DOC %d · 알려진 누락 %d 건 (%s)" % (
             len(a), len(b), len(gap), ", ".join(gap))
+    elif len(a) != DESIGN_KEY_COUNT:
+        known = False
+        detail = "키 %d 개 (기대 %d) · DOC 과는 일치" % (len(a), DESIGN_KEY_COUNT)
     else:
         detail = "%d 키 일치" % len(a)
     report.add("B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", PASS if known else FAIL, detail)
@@ -1105,6 +1201,28 @@ def check_no_label_leak(report, html, core):
     report.ok("C", "설정 라벨이 index.html 에 등장", not hits,
               "DESIGN_DOC %d + CFG_DOC %d 라벨 전부 미등장"
               % (len(core.DESIGN_DOC), len(core.THRESH_KEYS)),
+              "index.html 에 하드코딩됨: " + ", ".join(hits))
+
+
+# POOL_OPTS 는 값 "pool" 이 식별자 DOC.poolOpts 와 겹쳐 문자열 검사로 가릴 수
+# 없습니다. 순수한 데이터 목록인 둘만 봅니다.
+OPTLIST_NAMES = ("RNA_SOURCE_OPTS", "CDNA_OPTS")
+
+
+def check_no_optlist_leak(report, html, core):
+    """드롭다운 선택지는 core 에서 읽어야 한다. index.html 에 리터럴로 있으면 실패."""
+    hits, n = [], 0
+    for name in OPTLIST_NAMES:
+        opts = getattr(core, name, None)
+        if opts is None:
+            hits.append("core 에 %s 가 없음" % name)
+            continue
+        for v in opts:
+            n += 1
+            if v and any(x in html for x in _html_variants(v)):
+                hits.append("%s '%s'" % (name, v))
+    report.ok("C", "선택지 값이 index.html 에 등장", not hits,
+              "%s %d 개 값 전부 미등장" % (" + ".join(OPTLIST_NAMES), n),
               "index.html 에 하드코딩됨: " + ", ".join(hits))
 
 
@@ -2040,6 +2158,62 @@ def check_ambig_call_units(report, core):
               "후보 1 개(다중 표적)는 안 붙음", " / ".join(bad))
 
 
+def check_rna_source_units(report, core):
+    """fragment 별 RNA 출처를 한 문자열로 합치는 규칙.
+
+    05_실행설정은 개별 세 행 대신 합계 한 행만 냅니다. 그것이 정당하려면 합계
+    문자열이 27 조합을 모두 구분해야 하므로 전수로 확인합니다.
+    """
+    keys = list(core.RNA_KEYS)
+    opts = list(core.RNA_SOURCE_OPTS)
+    bad = []
+    if len(keys) != 3:
+        bad.append("RNA_KEYS 가 %d 개" % len(keys))
+    if len(opts) < 2:
+        bad.append("RNA_SOURCE_OPTS 가 %d 개" % len(opts))
+
+    def src(vals):
+        return core.build_config(dict(zip(keys, vals)), [])["rna_source"]
+
+    if len(keys) == 3 and opts:
+        a, b, c = opts[0], opts[1 % len(opts)], opts[2 % len(opts)]
+        # 셋이 같으면 그 값 하나
+        got = src([a, a, a])
+        if got != a:
+            bad.append("셋이 같을 때 %r (기대 %r)" % (got, a))
+        # 하나만 다르면 fragment 별로
+        got = src([a, a, b])
+        if got != "frag1 %s / frag2 %s / frag3 %s" % (a, a, b):
+            bad.append("하나만 다를 때 %r" % got)
+        if a in got and got == a:
+            bad.append("하나만 다른데 합쳐짐")
+        # 셋 다 다르면 fragment 별로
+        got = src([a, b, c])
+        if got != "frag1 %s / frag2 %s / frag3 %s" % (a, b, c):
+            bad.append("셋 다 다를 때 %r" % got)
+        # 전수 : 문자열이 서로 다른가
+        seen = {}
+        for combo in itertools.product(opts, repeat=3):
+            seen.setdefault(src(list(combo)), []).append(combo)
+        dup = [(t, v) for t, v in seen.items() if len(v) > 1]
+        if dup:
+            bad.append("합계가 겹치는 조합 %d 건: %s" % (len(dup), dup[:2]))
+        n_total, n_uniq = len(opts) ** 3, len(seen)
+    else:
+        n_total = n_uniq = 0
+
+    # 기본값이 선택지 안에 있는가
+    for k in keys:
+        d = core.DESIGN_DEFAULT_MAP.get(k)
+        if d not in opts:
+            bad.append("%s 기본값 %r 가 선택지 밖" % (k, d))
+
+    report.ok("E", "rna_source 조립 단위", not bad,
+              "%d 조합 전부 서로 다름 (문자열 %d 종) · 셋이 같으면 하나로 · "
+              "기본값 %d 개 전부 선택지 안" % (n_total, n_uniq, len(keys)),
+              " / ".join(bad))
+
+
 def check_doc_example_units(report, core):
     """용어설명 예시 선택 규칙. 조건에 맞는 쌍을 고르고, 없으면 폴백한다."""
     cfg = core.build_config(None, [])
@@ -2597,6 +2771,10 @@ LIB_EXPECT = {
     # QC2 는 실측 17 건입니다(제시값 18). minq 중앙값 29 · 범위 5~51 은 일치하므로
     # 개수만 어긋난 것으로 보고 실측값으로 고정합니다.
     "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
+    # 설계 키를 늘리거나 줄여도 판정 임계값과 판정 분기가 그대로면 두 해시는
+    # 움직이지 않아야 합니다. library 모드 · 배치 지정 없음 기준입니다.
+    "param_hash": "3473927a",
+    "design_hash": "68210578",
     # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
     "called_n": {"vh": 29, "jh": 30, "vl": 31, "vj": 17},
     "vh_species": (5, 5, [("VH4|VH6", 4)]),   # 확정 · 가능 · 동점 항목
@@ -2701,6 +2879,10 @@ def _check_h1(report, out):
         bad.append("클론 %d (기대 %d)" % (len(rows), LIB_EXPECT["n"]))
     if final != LIB_EXPECT["final"]:
         bad.append("최종판정 %s (기대 %s)" % (final, LIB_EXPECT["final"]))
+    for h in ("param_hash", "design_hash"):
+        got = out["config"].get(h)
+        if got != LIB_EXPECT[h]:
+            bad.append("%s %s (기대 %s)" % (h, got, LIB_EXPECT[h]))
     for key, got in (("qc_verdict", qcv), ("flags", flags)):
         want = LIB_EXPECT[key]
         if not want:
@@ -2711,8 +2893,10 @@ def _check_h1(report, out):
             bad.append("%s 불일치 %s" % (key, [(k, got.get(k), want.get(k))
                                               for k in only_got]))
     report.ok("H", H_NAMES[0], not bad,
-              "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종"
-              % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags)),
+              "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종 · "
+              "param_hash %s · design_hash %s"
+              % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags),
+                 LIB_EXPECT["param_hash"], LIB_EXPECT["design_hash"]),
               " / ".join(bad))
 
 
@@ -2953,6 +3137,8 @@ def main():
               check_readconfig_covers_design, report, js, core, glue or "")
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "05_실행설정이 설계 키를 덮는가",
+              check_sheet05_design_rows, report, core)
         guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
         guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
         guard(report, "B", "모호성 항목이 런타임 계산인가",
@@ -2976,6 +3162,8 @@ def main():
               check_no_const_leak, report, html, core)
         guard(report, "C", "설정 라벨이 index.html 에 등장",
               check_no_label_leak, report, html, core)
+        guard(report, "C", "선택지 값이 index.html 에 등장",
+              check_no_optlist_leak, report, html, core)
         guard(report, "C", "모드 값이 index.html 에 등장",
               check_no_mode_leak, report, html, core)
 
@@ -2999,6 +3187,7 @@ def main():
         guard(report, "E", "커버리지 기대 대상 단위", check_coverage_assigned_units,
               report, core)
         guard(report, "E", "용어설명 예시 선택 단위", check_doc_example_units, report, core)
+        guard(report, "E", "rna_source 조립 단위", check_rna_source_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 
