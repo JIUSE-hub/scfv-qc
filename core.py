@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "3.0"
+CORE_VERSION = "3.1"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -1500,7 +1500,42 @@ def compose_called(calls, cfg):
                      "max": max(lens) if lens else None}}
 
 
-def primer_coverage(calls, primers, cfg):
+def batch_assigned(cfg):
+    """cfg 에서 이 배치의 지정을 뽑는다. assigned 모드가 아니면 None."""
+    if cfg.get("analysis_mode") != MODE_ASSIGNED:
+        return None
+    fams = [] if cfg["batch_vh_family"] == NOSEL else [cfg["batch_vh_family"]]
+    chains = [] if cfg["batch_chain"] == NOSEL else [cfg["batch_chain"]]
+    return {"vh_families": fams, "chains": chains}
+
+
+def _expected_primer(p, group, chain, assigned):
+    """이 프라이머가 이 배치에서 나올 수 있는 대상인가.
+
+    그룹마다 배치 지정이 미치는 범위가 다릅니다.
+      F1_For   배치 VH family 가 직접 결정한다. families 가 지정 목록과 겹치는
+               프라이머만 기대 대상이다.
+      F3_For   배치 경쇄가 결정한다. 지정된 chain 의 버킷만 기대 대상이다.
+      F3_Rev   F3_For 와 같다.
+      F2_Rev   JH 는 Rev-2 pool 을 통째로 쓰므로 배치 지정과 무관하다. 전부 기대 대상.
+      F1_Rev / F2_For  채점 대상이 아니라 커버리지 계산에서 아예 제외한다.
+    지정이 비어 있는 축(예: batch_chain 이 "(지정 안 함)")은 제한하지 않습니다.
+    """
+    if assigned is None:
+        return True
+    if group == "F1_For":
+        fams = assigned.get("vh_families") or []
+        if not fams:
+            return True
+        # family 를 못 읽은 프라이머는 배제할 근거가 없으므로 기대 대상으로 둡니다.
+        return (not p["families"]) or bool(set(p["families"]) & set(fams))
+    if group in ("F3_For", "F3_Rev"):
+        chains = assigned.get("chains") or []
+        return (not chains) or (chain in chains)
+    return True
+
+
+def primer_coverage(calls, primers, cfg, assigned=None):
     """그룹·사슬별로 한 번이라도 판정에 나온 프라이머와 미관측 프라이머.
 
     동점으로 여러 후보가 나온 경우 그 후보를 전부 관측으로 셉니다. 어느
@@ -1526,17 +1561,34 @@ def primer_coverage(calls, primers, cfg):
         if p["group"] in SCORED_GROUPS:
             buckets.setdefault((p["group"], p["chain"]), []).append(p)
     out = []
+    def brief(plist):
+        return [{"name": x["name"], "families": list(x["families"])} for x in plist]
+
     for (group, chain), plist in sorted(buckets.items()):
         names = seen.get((group, chain), set())
         n, S = n_by.get((group, chain), 0), len(plist)
+        exp_names = set(p["name"] for p in plist
+                        if _expected_primer(p, group, chain, assigned))
+        exp = [p for p in plist if p["name"] in exp_names]
         miss = [p for p in plist if p["name"] not in names]
-        p_miss = ((1.0 - 1.0 / S) ** n) if S else 1.0
+        miss_exp = [p for p in miss if p["name"] in exp_names]
+        miss_oth = [p for p in miss if p["name"] not in exp_names]
+        E = len(exp)
+        # 검정력 모수는 전체가 아니라 기대 대상 수입니다. 지정하지 않은 프라이머를
+        # 모수에 넣으면 종 수가 부풀려져 검정력이 과소평가됩니다.
+        power = ((1.0 - 1.0 / E) ** n) if E else None
         out.append({"group": group, "chain": chain, "total": S, "n": n,
                     "observed": S - len(miss),
-                    "unobserved": [{"name": p["name"], "families": list(p["families"])}
-                                   for p in miss],
-                    "p_miss": p_miss,
-                    "underpowered": p_miss >= RULES["COVERAGE_ALPHA"]})
+                    "unobserved": brief(miss),
+                    # 아래가 배치 지정을 반영한 값입니다.
+                    "total_n": S, "expected_n": E,
+                    "observed_expected": E - len(miss_exp),
+                    "missing_expected": brief(miss_exp),
+                    "missing_other": brief(miss_oth),
+                    "power_p": power,
+                    # p_miss 는 예전 이름이며 power_p 와 같은 값입니다.
+                    "p_miss": power,
+                    "underpowered": bool(E) and power >= RULES["COVERAGE_ALPHA"]})
     return out
 
 
@@ -1817,6 +1869,12 @@ def glossary(primers=None, cfg=None):
          "VH FR4 의 보존 모티프 " + CONST["FR4_MOTIF"] + " (Trp-Gly-Xxx-Gly). 정규식으로 쓰이며 "
          "CDR3-H3 의 끝 지점을 정한다. 이 모티프를 못 찾으면 CDR3-H3 가 추출되지 않는다."],
 
+        ["배치 조성", "기대 대상과 배치 무관",
+         "커버리지는 배치에 지정된 프라이머만 기대 대상으로 센다. 지정하지 않은 family 나 "
+         "경쇄의 프라이머는 나올 수 없으므로 미관측이어도 dropout 이 아니다. 검정력 계산의 "
+         "모수도 기대 대상 수를 쓴다 — 전체 수를 쓰면 검정력이 과소평가된다. JH 는 pool 을 "
+         "통째로 쓰므로 배치 지정과 무관하게 전부 기대 대상이다. Library 와 Negative control "
+         "모드에는 지정이 없으므로 전체가 기대 대상이 된다."],
         ["배치 조성", "확정 종 수와 가능 종 수",
          "동점 판정(VH4|VH6 등)은 어느 family 인지 확정되지 않았으므로 종 수를 두 값으로 "
          "센다. 확정 종 수는 단독 판정만으로 세고, 가능 종 수는 동점 항목의 구성원까지 "
@@ -2041,21 +2099,36 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None, coverage=None
 
     # 커버리지 : 미관측 프라이머가 dropout 신호인지, 표본이 부족한 것인지
     alpha = RULES["COVERAGE_ALPHA"]
+    names_of = lambda lst: ", ".join("%s(%s)" % (u["name"], "|".join(u["families"]) or "?")
+                                     for u in lst)
     for cv in coverage or []:
         tag = "%s / %s" % (cv["group"], cv["chain"])
+        if not cv["expected_n"]:
+            # 배치에 지정되지 않은 버킷. 표본 부족과는 다른 상태입니다.
+            r4.append(["커버리지", tag, "해당 배치 없음",
+                       "이 배치에 지정되지 않아 나올 수 없는 프라이머 %d 종입니다. "
+                       "미관측이 dropout 이 아니므로 검정력을 계산하지 않습니다."
+                       % cv["total_n"]])
+            continue
         r4.append(["커버리지", tag,
-                   "%d / %d 관측 (n=%d)" % (cv["observed"], cv["total"], cv["n"]),
-                   "미관측 %d 종%s" % (len(cv["unobserved"]),
-                                     " · 표본 부족" if cv["underpowered"] else "")])
-        if cv["unobserved"]:
+                   "%d / %d 관측 (n=%d)"
+                   % (cv["observed_expected"], cv["expected_n"], cv["n"]),
+                   "기대 대상 %d 종 (전체 %d) · 미관측 %d 종 · 균등 사용 가정에서 "
+                   "특정 1 종이 안 나올 확률 (1-1/%d)^%d = %.3f %s %.2f%s. 실제 "
+                   "germline 사용 빈도는 균등하지 않으므로 이 값은 하한입니다."
+                   % (cv["expected_n"], cv["total_n"], len(cv["missing_expected"]),
+                      cv["expected_n"], cv["n"], cv["power_p"],
+                      ">=" if cv["underpowered"] else "<", alpha,
+                      " · 표본 부족" if cv["underpowered"] else " · 검정력 충분")])
+        if cv["missing_expected"]:
             r4.append(["커버리지", tag + " 미관측",
-                       ", ".join("%s(%s)" % (u["name"], "|".join(u["families"]) or "?")
-                                 for u in cv["unobserved"]),
-                       "균등 사용 가정에서 특정 1 종이 안 나올 확률 "
-                       "(1-1/%d)^%d = %.3f %s %.2f. 실제 germline 사용 빈도는 "
-                       "균등하지 않으므로 이 값은 하한이며, 실제로는 미관측이 더 "
-                       "흔합니다." % (cv["total"], cv["n"], cv["p_miss"],
-                                    ">=" if cv["underpowered"] else "<", alpha)])
+                       names_of(cv["missing_expected"]),
+                       "기대 대상인데 한 번도 나오지 않았습니다. dropout 후보입니다."])
+        if cv["missing_other"]:
+            r4.append(["커버리지", tag + " 배치 무관",
+                       names_of(cv["missing_other"]),
+                       "배치 무관 항목은 이 배치에 지정되지 않아 나올 수 없었던 "
+                       "것이며 dropout 이 아닙니다."])
 
     if comp["cdr3_lens"]:
         r4.append(["CDR3-H3", "길이 목록 (aa)",
@@ -2497,7 +2570,8 @@ def analyze(files, primer_text="", overrides=None, meta=None):
     meta.setdefault("primer_file", meta.get("primer_file", ""))
     meta["primer_n"] = len(primers)
     meta["files"] = [r["filename"] for r in reads]
-    coverage = primer_coverage(calls, primers, cfg) if primers else []
+    coverage = (primer_coverage(calls, primers, cfg, batch_assigned(cfg))
+                if primers else [])
     sheets = build_sheets(qc_results, calls, cfg, comp, meta, primers, coverage)
     summary_rows = sheets[0]["rows"]
 

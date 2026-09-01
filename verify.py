@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.2"
+VERIFY_VERSION = "3.3"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1840,6 +1840,70 @@ def check_primer_coverage_units(report, core):
               " / ".join(bad))
 
 
+def check_coverage_assigned_units(report, core):
+    """배치 지정이 그룹마다 다르게 작용하는가. 검정력 모수도 기대 대상 수인가."""
+    cfg = core.build_config(None, [])
+
+    def prim(name, fam, group="F1_For", chain="heavy"):
+        return {"name": name, "seq": "A" * 10, "core": "A" * 10, "core_trim": 0,
+                "len": 10, "group": group, "chain": chain, "family": fam,
+                "families": [fam], "target": "", "fragment": "", "dir": "", "tm": ""}
+
+    primers = [prim("f1a", "VH1"), prim("f1b", "VH2"), prim("f1c", "VH3"),
+               prim("jh1", "JH1", "F2_Rev"), prim("jh2", "JH2", "F2_Rev"),
+               prim("k1", "IGKV1", "F3_For", "kappa"),
+               prim("l1", "IGLV1", "F3_For", "lambda"),
+               prim("rk1", "IGKJ1", "F3_Rev", "kappa"),
+               prim("rl1", "IGLJ1", "F3_Rev", "lambda")]
+    calls = [_fake_call("c1", vh=_fake_group(["f1a"], ["VH1"]))]
+    assigned = {"vh_families": ["VH1", "VH2"], "chains": ["kappa"]}
+    by = dict(((c["group"], c["chain"]), c)
+              for c in core.primer_coverage(calls, primers, cfg, assigned))
+    bad = []
+    f1 = by[("F1_For", "heavy")]
+    if f1["expected_n"] != 2 or f1["total_n"] != 3:
+        bad.append("F1_For 기대 %d/전체 %d (기대 2/3)" % (f1["expected_n"], f1["total_n"]))
+    if [u["name"] for u in f1["missing_expected"]] != ["f1b"]:
+        bad.append("F1_For 미관측 %s (기대 ['f1b'])"
+                   % [u["name"] for u in f1["missing_expected"]])
+    if [u["name"] for u in f1["missing_other"]] != ["f1c"]:
+        bad.append("F1_For 배치무관 %s (기대 ['f1c'])"
+                   % [u["name"] for u in f1["missing_other"]])
+    # JH 는 pool 이라 배치 지정이 좁히지 않는다
+    jh = by[("F2_Rev", "heavy")]
+    if jh["expected_n"] != 2:
+        bad.append("F2_Rev 기대 %d (기대 2 · JH 는 pool)" % jh["expected_n"])
+    # chain 지정이 F3_For / F3_Rev 를 좁힌다
+    for g in ("F3_For", "F3_Rev"):
+        if by[(g, "kappa")]["expected_n"] != 1:
+            bad.append("%s/kappa 기대 %d (기대 1)" % (g, by[(g, "kappa")]["expected_n"]))
+        lam = by[(g, "lambda")]
+        if lam["expected_n"] != 0:
+            bad.append("%s/lambda 기대 %d (기대 0)" % (g, lam["expected_n"]))
+        elif lam["power_p"] is not None or lam["underpowered"]:
+            bad.append("%s/lambda 기대 0 인데 검정력 %s / %s"
+                       % (g, lam["power_p"], lam["underpowered"]))
+
+    # 검정력 모수가 기대 대상 수인가 : 전체 3 이면 0.296, 기대 2 면 0.125 (n=3)
+    many = [_fake_call("c%d" % i, vh=_fake_group(["f1a"], ["VH1"])) for i in range(3)]
+    got = dict(((c["group"], c["chain"]), c)
+               for c in core.primer_coverage(many, primers, cfg, assigned))[("F1_For", "heavy")]
+    if abs(got["power_p"] - (1 - 1.0 / 2) ** 3) > 1e-9:
+        bad.append("검정력 모수가 기대 대상이 아님 (p=%.4f)" % got["power_p"])
+
+    # assigned=None 이면 예전 동작
+    none_by = dict(((c["group"], c["chain"]), c)
+                   for c in core.primer_coverage(calls, primers, cfg, None))
+    f1n = none_by[("F1_For", "heavy")]
+    if f1n["expected_n"] != 3 or f1n["missing_other"]:
+        bad.append("assigned=None 인데 기대 %d · 배치무관 %s"
+                   % (f1n["expected_n"], f1n["missing_other"]))
+
+    report.ok("E", "커버리지 기대 대상 단위", not bad,
+              "F1_For 은 family 로 · F3_* 는 chain 으로 좁힘 · F2_Rev 는 안 좁힘 · "
+              "기대 0 이면 검정력 없음 · None 이면 전체", " / ".join(bad))
+
+
 def check_linker_recovery_units(report, core):
     """이슈 15 : 완전 일치가 놓친 링커를 랜드마크 위치로 보정하는가."""
     cfg = core.build_config(None, [])
@@ -1956,7 +2020,8 @@ def check_badge_states(report, js):
 # 있어 core 만 불러서는 닿지 않으므로, GLUE 템플릿 리터럴을 꺼내 그대로 실행하고
 # testdata 를 두 배치로 나눠 돌립니다. 기대값은 실측해 고정했습니다.
 F_NAMES = ["F1 배치 2 개 병합", "F2 배치 label 구분", "F3 배치 지정 불일치",
-           "F4 param_hash 불일치 오류", "F5 library 경로", "F6 병합 시트 구조"]
+           "F4 param_hash 불일치 오류", "F5 library 경로", "F6 병합 시트 구조",
+           "F7 배치 지정 수집"]
 
 GLUE_EXPECT = {
     "param_hash": "3473927a",
@@ -2085,6 +2150,7 @@ def check_glue(report, glue, core):
         _check_f4(report, ns, core, same, cfg, meta)
         _check_glue_library(report, ns, core, cfg, meta)
         _check_f6(report, merged_box)
+        _check_f7(report, ns, core, dirs, cfg, meta)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -2114,6 +2180,41 @@ def _check_f1(report, out):
               % (GLUE_EXPECT["param_hash"], GLUE_EXPECT["design_hash"],
                  GLUE_EXPECT["merged_rows"], GLUE_EXPECT["n_good"],
                  GLUE_EXPECT["cdr3_median"], GLUE_EXPECT["fasta_n"]),
+              " / ".join(bad))
+
+
+def _check_f7(report, ns, core, dirs, cfg, meta):
+    """GLUE 가 전체 배치의 지정을 모아 merged 커버리지에 넘기는가."""
+    specs = [{"dir": dirs["b1"], "vh": "VH6", "chain": "kappa"},
+             {"dir": dirs["b2"], "vh": "VH2", "chain": "lambda"}]
+    out = _run_batches(ns, core, specs, cfg, meta)
+    bad = []
+    if not out.get("ok"):
+        bad.append("실행 실패: " + "; ".join(out.get("errors", [])))
+    else:
+        spec = out["merged"].get("batch_spec") or {}
+        if sorted(spec.get("vh_families") or []) != ["VH2", "VH6"]:
+            bad.append("vh_families %s (기대 ['VH2','VH6'])" % spec.get("vh_families"))
+        if sorted(spec.get("chains") or []) != ["kappa", "lambda"]:
+            bad.append("chains %s (기대 ['kappa','lambda'])" % spec.get("chains"))
+        cov = dict(((c["group"], c["chain"]), c)
+                   for c in out["merged"].get("coverage") or [])
+        if not cov:
+            bad.append("merged 커버리지가 비어 있음")
+        else:
+            # 두 배치를 합쳤으므로 kappa 와 lambda 둘 다 기대 대상이어야 합니다.
+            for ch in ("kappa", "lambda"):
+                c = cov.get(("F3_For", ch))
+                if c is None or not c["expected_n"]:
+                    bad.append("F3_For/%s 기대 %s (배치를 합치면 0 이면 안 됨)"
+                               % (ch, c and c["expected_n"]))
+            # 배치별 결과는 그 배치의 지정만 반영합니다.
+            b0 = out["batches"][0]["result"]["coverage"]
+            b0m = dict(((c["group"], c["chain"]), c) for c in b0)
+            if b0m[("F3_For", "lambda")]["expected_n"] != 0:
+                bad.append("배치 1(kappa 지정)인데 lambda 가 기대 대상")
+    report.ok("F", F_NAMES[6], not bad,
+              "merged 는 VH2+VH6 · kappa+lambda 를 합쳐 반영 · 배치별은 자기 지정만",
               " / ".join(bad))
 
 
@@ -2345,7 +2446,8 @@ def check_negctrl_regression(report, core):
 # 개별 변동은 흡수하되 전체 경향이 바뀌면 잡히게 합니다.
 LIB_DIR = os.path.join(TESTDATA, "lib260901")
 H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
-           "H4 오염 분자 추적", "H5 랜드마크 이상 품질", "H6 판별 성공·커버리지"]
+           "H4 오염 분자 추적", "H5 랜드마크 이상 품질", "H6 판별 성공·커버리지",
+           "H7 배치 지정 반영 커버리지"]
 
 LIB_EXPECT = {
     "n": 49,
@@ -2389,6 +2491,23 @@ LIB_EXPECT = {
     # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
     "called_n": {"vh": 29, "jh": 30, "vl": 31, "vj": 17},
     "vh_species": (5, 5, [("VH4|VH6", 4)]),   # 확정 · 가능 · 동점 항목
+    # 260901 은 VH1·VH2·VH4·VH5·VH6 x kappa 다섯 배치였고 VH3 와 lambda 는 보내지
+    # 않았습니다. 그 지정을 반영하면 진짜 dropout 후보는 둘뿐입니다.
+    "batch_spec": {"vh_families": ["VH1", "VH2", "VH4", "VH5", "VH6"],
+                   "chains": ["kappa"]},
+    # (기대 수, 관측 수, 미관측 이름, 배치무관 개수, 표본부족)
+    # 배치무관은 lambda 버킷에서 25·9 종이라 개수로만 둡니다. 이름이 중요한
+    # F1_For 은 아래 coverage_other_names 로 따로 고정합니다.
+    "coverage_assigned": {
+        ("F1_For", "heavy"): (7, 6, ["For-1-1c"], 2, False),
+        ("F2_Rev", "heavy"): (4, 4, [], 0, False),
+        ("F3_For", "kappa"): (20, 13, ["For3-k-3", "For3-k-4", "For3-k-9", "For3-k-15",
+                                       "For3-k-17", "For3-k-19", "For3-k-20"], 0, True),
+        ("F3_For", "lambda"): (0, 0, [], 25, False),
+        ("F3_Rev", "kappa"): (4, 3, ["Rev3-k-4"], 0, False),
+        ("F3_Rev", "lambda"): (0, 0, [], 9, False),
+    },
+    "coverage_other_names": {("F1_For", "heavy"): ["For-1-3b", "For-1-3c"]},
     "coverage": {
         ("F1_For", "heavy"): (9, 6, 3, False),
         ("F2_Rev", "heavy"): (4, 4, 0, False),
@@ -2448,6 +2567,7 @@ def check_lib_regression(report, core):
     _check_h1(report, out)
     _check_h5(report, core, out)
     _check_h6(report, core, out)
+    _check_h7(report, core, out)
     _check_h3(report, core, out, files, meta)
     _check_h4(report, out, core)
     _check_h2(report, core, files, ptext, meta)
@@ -2485,6 +2605,36 @@ def _check_h1(report, out):
               "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종"
               % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags)),
               " / ".join(bad))
+
+
+def _check_h7(report, core, out):
+    """배치 지정을 반영한 커버리지. 지정하지 않은 프라이머는 dropout 이 아닙니다."""
+    src = os.path.join(ROOT, TESTDATA, "scFv_primers.fa")
+    with io.open(src, encoding="utf-8", errors="ignore") as fh:
+        primers, _t, _w = core.parse_primer_fasta(fh.read())
+    cov = core.primer_coverage(out["calls"], primers, out["config"],
+                               dict(LIB_EXPECT["batch_spec"]))
+    got = dict(((c["group"], c["chain"]),
+                (c["expected_n"], c["observed_expected"],
+                 [u["name"] for u in c["missing_expected"]],
+                 len(c["missing_other"]), c["underpowered"]))
+               for c in cov)
+    want = LIB_EXPECT["coverage_assigned"]
+    bad = [(k, got.get(k), want.get(k)) for k in sorted(set(got) | set(want))
+           if got.get(k) != want.get(k)]
+    for key, names in LIB_EXPECT["coverage_other_names"].items():
+        got_names = [u["name"] for c in cov if (c["group"], c["chain"]) == key
+                     for u in c["missing_other"]]
+        if got_names != names:
+            bad.append((key, "배치무관 이름", got_names, names))
+    # 기대 0 인 버킷은 검정력을 계산하지 않아야 합니다.
+    for c in cov:
+        if not c["expected_n"] and c["power_p"] is not None:
+            bad.append(("%s/%s" % (c["group"], c["chain"]), "power_p", c["power_p"]))
+    report.ok("H", H_NAMES[6], not bad,
+              "F1_For 기대 7 관측 6 (미관측 For-1-1c · 배치무관 2) · "
+              "F3_Rev/kappa 미관측 Rev3-k-4 · lambda 두 버킷 해당 배치 없음",
+              "; ".join(str(x) for x in bad))
 
 
 def _check_h6(report, core, out):
@@ -2734,6 +2884,8 @@ def main():
         guard(report, "E", "compose_called 단위", check_compose_called_units, report, core)
         guard(report, "E", "확정/가능 종 수 단위", check_species_count_units, report, core)
         guard(report, "E", "primer_coverage 단위", check_primer_coverage_units,
+              report, core)
+        guard(report, "E", "커버리지 기대 대상 단위", check_coverage_assigned_units,
               report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)

@@ -467,8 +467,17 @@ def js_analyze_batches(batches_json, cfg_json, meta_json):
     for b in done:
         all_calls.extend(b["result"]["calls"])
     comp_all = core.compose(all_calls, lib_cfg)
+    # 커버리지는 배치 하나가 아니라 전체 지정을 모아 봐야 의미가 있습니다.
+    # 배치별 결과에는 core.analyze 가 그 배치의 지정만 반영해 둡니다.
+    primers_all, _tr, _wn = core.parse_primer_fasta(ptxt) if ptxt else ([], {}, [])
+    assigned_all = {"vh_families": sorted(set(b["vh"] for b in done
+                                              if b["vh"] != core.NOSEL)),
+                    "chains": sorted(set(b["chain"] for b in done
+                                         if b["chain"] != core.NOSEL))}
+    cov_all = (core.primer_coverage(all_calls, primers_all, lib_cfg, assigned_all)
+               if primers_all else [])
     # 전체 04 블록도 core 가 만들게 합니다. 빈 qc/calls 를 넘기면 04 만 채워집니다.
-    all04 = core.build_sheets([], [], lib_cfg, comp_all, meta)
+    all04 = core.build_sheets([], [], lib_cfg, comp_all, meta, primers_all, cov_all)
     rows04_all = all04[_sheet_at(all04, "04")]["rows"]
 
     sheets = []
@@ -516,6 +525,8 @@ def js_analyze_batches(batches_json, cfg_json, meta_json):
         "batches": done,
         "merged": {"summary": {"headers": headers, "rows": rows},
                    "composition": comp_all, "config": res0["config"],
+                   "called": core.compose_called(all_calls, lib_cfg),
+                   "coverage": cov_all, "batch_spec": assigned_all,
                    "fasta": fasta},
     }, ensure_ascii=False, default=str)
 `;
@@ -1168,16 +1179,28 @@ function renderComposition(){
     h += '<div class="grp-h"><span>프라이머 커버리지</span>' +
       '<span class="m">미관측이 dropout 인지 표본 부족인지는 아래 판정을 보세요</span>' +
       "</div><dl class=\"kv\">";
+    const nameList = (a) =>
+      esc(a.map(u => u.name + "(" + (u.families.join("|") || "?") + ")").join(", "));
     CV.forEach(c => {
-      h += "<dt>" + esc(c.group + " / " + c.chain) + "</dt><dd>" +
-        c.observed + " / " + c.total + " 관측 (n=" + c.n + ")" +
+      const dt = "<dt>" + esc(c.group + " / " + c.chain) + "</dt>";
+      if (!c.expected_n){
+        // 배치에 지정되지 않은 버킷. 화면을 어지럽히지 않게 회색으로 약하게 둡니다.
+        h += dt + '<dd style="color:var(--muted)">해당 배치 없음 <span style="font-size:12px">· ' +
+          "이 배치에 지정되지 않은 " + c.total_n + " 종</span></dd>";
+        return;
+      }
+      h += dt + "<dd>" + c.observed_expected + " / " + c.expected_n + " 관측 (n=" + c.n + ")" +
         (c.underpowered
-          ? ' <span style="color:var(--warn)">· 표본 부족 (p=' + c.p_miss.toFixed(3) + ')</span>'
+          ? ' <span style="color:var(--warn)">· 표본 부족 (p=' + c.power_p.toFixed(3) + ')</span>'
+          : ' <span style="color:var(--muted)">· 검정력 충분 (p=' + c.power_p.toFixed(3) + ')</span>') +
+        (c.missing_expected.length
+          ? '<div style="margin-top:3px;font-size:12px"><span style="color:var(--warn);font-weight:600">미관측</span> ' +
+            nameList(c.missing_expected) + "</div>"
           : "") +
-        (c.unobserved.length
-          ? '<div style="margin-top:3px;color:var(--muted);font-size:12px">미관측 ' +
-            esc(c.unobserved.map(u => u.name + "(" + (u.families.join("|") || "?") + ")")
-              .join(", ")) + "</div>"
+        (c.missing_other.length
+          ? '<div style="margin-top:2px;color:var(--muted);font-size:12px">배치 무관 ' +
+            nameList(c.missing_other) + " &middot; 이 배치에 지정되지 않아 나올 수 없었던 " +
+            "것이며 dropout 이 아닙니다</div>"
           : "") + "</dd>";
     });
     h += "</dl>";
