@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "3.1"
+CORE_VERSION = "3.2"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -1592,6 +1592,119 @@ def primer_coverage(calls, primers, cfg, assigned=None):
     return out
 
 
+# --- 용어설명 예시를 프라이머 FASTA 에서 고른다 -------------------------------
+# 개념 설명이되 예시가 있어야 읽히는 항목들입니다. 이름을 코드에 박으면 프라이머
+# 세트가 바뀔 때 설명이 사실과 달라지므로, 조건을 정해 실행 시 고릅니다.
+# 조건에 맞는 것이 없으면 예시 없이 개념만 서술합니다.
+def _pick_delta_pair(primers, cfg):
+    """Δ 예시 : F2_Rev 에서 비호환 위치가 가장 적은 쌍 (이름순 tie-break)."""
+    cand = [p for p in primer_ambiguity(primers, cfg) if p["group"] == "F2_Rev"]
+    if not cand:
+        return None
+    return sorted(cand, key=lambda p: (p["incompatible"], p["a"], p["b"]))[0]
+
+
+def _pick_same_family_pair(primers, cfg):
+    """모호성 표기 예시 : 채점 그룹의 certain 등급이면서 같은 family 인 쌍."""
+    cand = [p for p in primer_ambiguity(primers, cfg)
+            if p["tie"] == "certain" and p["same_family"] and p["scored"]]
+    if not cand:
+        return None
+    return sorted(cand, key=lambda p: (p["incompatible"], p["group"], p["a"], p["b"]))[0]
+
+
+def _pick_superset_pair(primers):
+    """CDR3 경계 예시 : F1_Rev / F2_For 에서 축퇴 공간이 다른 family 프라이머를
+    완전히 포함하는 쌍. (a 의 모든 위치가 b 를 집합으로 포함)"""
+    best = None
+    for group in ("F1_Rev", "F2_For"):
+        pl = [p for p in primers if p["group"] == group]
+        for a in pl:
+            for b in pl:
+                if a["name"] == b["name"]:
+                    continue
+                if set(a["families"]) == set(b["families"]):
+                    continue
+                ca, cb = a["core"], b["core"]
+                n = min(len(ca), len(cb))
+                if n and all(set(IUPAC.get(cb[i], cb[i])) <= set(IUPAC.get(ca[i], ca[i]))
+                             for i in range(n)):
+                    key = (group, a["name"], b["name"])
+                    if best is None or key < best[0]:
+                        best = (key, a, b, n)
+    return best
+
+
+def _pick_multi_target(primers):
+    """프라이머 하나가 여러 germline 을 표적하는 예시 (후보 1 개인데 라벨에 | 가 붙는 경우)."""
+    cand = [p for p in primers
+            if p["group"] in SCORED_GROUPS and len(p["families"]) > 1]
+    return sorted(cand, key=lambda p: p["name"])[0] if cand else None
+
+
+def _doc_pipe_meanings(primers, cfg):
+    """family 칸의 | 가 갖는 두 가지 뜻. 예시는 프라이머 세트에서 고릅니다."""
+    multi = _pick_multi_target(primers) if primers else None
+    tie = None
+    if primers and cfg:
+        cand = [p for p in primer_ambiguity(primers, cfg)
+                if not p["same_family"] and p["scored"]]
+        tie = sorted(cand, key=lambda p: (p["incompatible"], p["group"],
+                                          p["a"], p["b"]))[0] if cand else None
+    a = ("예: %s 는 %s 한 프라이머가 여러 germline 을 함께 잡도록 설계된 것입니다. "
+         % ("|".join(multi["families"]), multi["name"])) if multi else ""
+    b = ("예: %s 는 %s 와 %s 가 같은 미스매치로 걸린 것입니다. "
+         % ("|".join(tie["families"]), tie["a"], tie["b"])) if tie else ""
+    return ("family 칸에 여러 값이 | 로 적히는 경우는 두 가지이고 뜻이 다릅니다. "
+            "(a) 프라이머 하나가 여러 germline 을 표적하는 경우 — " + a +
+            "(b) 프라이머 여러 개가 서로 구분되지 않아 동점인 경우 — " + b +
+            "03_프라이머판별의 '후보수' 열로 구분합니다. 1 이면 (a), 2 이상이면 (b) 입니다. "
+            "(b) 라면 같은 시트의 '모호성' 열에 어느 쌍이 어느 등급으로 관여했는지 나옵니다.")
+
+
+def _doc_delta(primers, cfg):
+    head = "최상위 후보와 그 다음 후보의 미스매치 차이. 클수록 판정 근거가 두껍습니다. "
+    p = _pick_delta_pair(primers, cfg) if primers and cfg else None
+    if p:
+        head += ("이번 프라이머 세트에서는 %s 과 %s 가 판별구간 %d nt 중 %d 곳에서만 "
+                 "갈리므로 그 그룹의 Δ 가 작습니다. " % (p["a"], p["b"], p["cmp_len"],
+                                                    p["incompatible"]))
+    return (head + "해당 구간 Q 가 50 이상이면 오독 확률이 10^-5 수준이라 1 nt 차이도 "
+            "신뢰할 만합니다. 판정이 실패(X)한 경우의 Δ 는 실패한 후보들끼리의 순위차일 "
+            "뿐이므로 읽지 않습니다.")
+
+
+def _doc_ambig_notation(primers, cfg):
+    p = _pick_same_family_pair(primers, cfg) if primers and cfg else None
+    if p:
+        shown = fmt_call({"ok": True, "families": p["families"], "names": [p["a"], p["b"]]})
+        head = "%s 처럼 표기합니다. " % shown
+    else:
+        head = "family (프라이머 후보들) 형태로 표기합니다. "
+    return (head + "왼쪽 family 는 확정이고, 괄호 안은 축퇴 공간이 겹쳐 서로 구분할 수 "
+            "없는 프라이머 후보 집합입니다. 하나로 골라 적는 것은 근거 없는 정보이므로 "
+            "하지 않습니다. family 칸에 여러 germline 이 | 로 적히는 경우도 같은 기호를 "
+            "쓰지만, 프라이머 하나가 여러 germline 을 표적하는 것이라면 후보 프라이머는 "
+            "1 개입니다.")
+
+
+def _doc_cdr3_boundary(primers):
+    hit = _pick_superset_pair(primers) if primers else None
+    if hit:
+        (_g, a_name, b_name), a, b, n = hit
+        why = ("%s(%s) 의 축퇴 공간이 %s(%s) 를 판별구간 %d nt 전체에서 완전히 포함해 "
+               "유일 배정이 불가능합니다" % (a_name, "|".join(a["families"]) or "?",
+                                        b_name, "|".join(b["families"]) or "?", n))
+    else:
+        why = ("일부 프라이머의 축퇴 공간이 다른 family 프라이머를 완전히 포함해 "
+               "유일 배정이 불가능합니다")
+    return ("분류에 쓰지 않고 정합성 검사로만 씁니다. 이유 두 가지 - (1) " + why +
+            ". (2) overlap extension 중 proofreading 중합효소의 3'->5' exonuclease 가 "
+            "미스매치된 3' 말단을 제거하고 상대 fragment 를 주형으로 재연장하기 때문에, "
+            "이 구간은 프라이머 서열과 원 주형의 혼합이 됩니다. 그래서 양끝 %d nt 를 "
+            "제외하고 채점합니다." % RULES["EXO_TRIM"])
+
+
 def fmt_species(g):
     """확정 종 수 · 가능 종 수를 사람이 읽을 한 줄로."""
     cert, poss = g["species_certain"], g["species_possible"]
@@ -1703,26 +1816,11 @@ def glossary(primers=None, cfg=None):
          "판별구간과 read 서열이 다른 위치의 개수. 축퇴염기(R, Y, S, W, K, M, B, D, H, V, N)는 "
          "해당 염기 집합 안이면 일치로 셉니다. 프라이머 구간은 프라이머 서열이 그대로 복제된 "
          "자리이므로 오독 외에는 불일치가 나올 이유가 없습니다."],
-        ["프라이머 판별", "Δ (차순위 간격)",
-         "최상위 후보와 그 다음 후보의 미스매치 차이. 클수록 판정 근거가 두껍습니다. "
-         "JH 는 Rev-2-123 과 Rev-2-4 가 판별구간 15 nt 중 단 1곳에서만 갈리므로 Δ 가 항상 1 입니다. "
-         "해당 구간 Q 가 50 이상이면 오독 확률이 10^-5 수준이라 1 nt 차이도 신뢰할 만합니다. "
-         "판정이 실패(X)한 경우의 Δ 는 실패한 후보들끼리의 순위차일 뿐이므로 읽지 않습니다."],
-        ["프라이머 판별", "모호성 표기",
-         "IGKV1 (For3-k-5|6) 처럼 표기합니다. 왼쪽 family 는 확정이고, 괄호 안은 축퇴 공간이 "
-         "겹쳐 서로 구분할 수 없는 프라이머 후보 집합입니다. 하나로 골라 적는 것은 근거 없는 "
-         "정보이므로 하지 않습니다. family 칸의 JH1|JH2 처럼 프라이머 하나가 여러 germline 을 "
-         "표적하는 경우도 같은 기호를 쓰지만, 이때 후보 프라이머는 1 개입니다."],
+        ["프라이머 판별", "Δ (차순위 간격)", _doc_delta(primers, cfg)],
+        ["프라이머 판별", "모호성 표기", _doc_ambig_notation(primers, cfg)],
         ["프라이머 판별", "모호성 클러스터", _ambiguity_doc(primers, cfg)],
-        ["프라이머 판별", "VH4|VH6 같은 표기의 두 가지 뜻",
-         "family 칸에 여러 값이 | 로 적히는 경우는 두 가지이고 뜻이 다릅니다. "
-         "(a) 프라이머 하나가 여러 germline 을 표적하는 경우 — 예: JH1|JH2 는 "
-         "Rev-2-123 한 프라이머가 JH1 과 JH2 를 함께 잡도록 설계된 것입니다. "
-         "(b) 프라이머 여러 개가 서로 구분되지 않아 동점인 경우 — 예: VH4|VH6 은 "
-         "For-1-4b 와 For-1-6 이 같은 미스매치로 걸린 것입니다. "
-         "03_프라이머판별의 '후보수' 열로 구분합니다. 1 이면 (a), 2 이상이면 (b) 입니다. "
-         "(b) 라면 같은 시트의 '모호성' 열에 어느 쌍이 어느 등급으로 관여했는지 나옵니다."],
-        ["프라이머 판별", "AMBIG_CALL?",
+        ["프라이머 판별", "family 칸의 | 가 갖는 두 가지 뜻",
+         _doc_pipe_meanings(primers, cfg)],        ["프라이머 판별", "AMBIG_CALL?",
          "판정 후보 프라이머가 2 개 이상이고 그 후보들이 서로 다른 family 를 가리키는 "
          "경우다. 결과의 family 칸에 VH4|VH6 처럼 여러 값이 적히며, 어느 쪽인지 이 판별만 "
          "으로는 좁힐 수 없다. 배치 지정 여부와 무관하게 붙는다 — 배치 지정 family 가 "
@@ -1753,12 +1851,7 @@ def glossary(primers=None, cfg=None):
         ["프라이머 판별", "그룹 F3_For",
          "VL FR1. 링커 끝을 앵커로 잡습니다. kappa / lambda 를 각각 채점해 낮은 쪽을 택합니다."],
         ["프라이머 판별", "그룹 F3_Rev", "VL J. AscI 를 앵커로 잡는 역방향 프라이머. 신뢰도 높음."],
-        ["프라이머 판별", "CDR3 경계 (F1_Rev / F2_For)",
-         "분류에 쓰지 않고 정합성 검사로만 씁니다. 이유 두 가지 - (1) Rev-1-3 / For-2-3 의 축퇴 "
-         "공간이 다른 family 프라이머를 완전히 포함해 유일 배정이 불가능합니다. "
-         "(2) overlap extension 중 proofreading 중합효소의 3'->5' exonuclease 가 미스매치된 3' 말단을 "
-         "제거하고 상대 fragment 를 주형으로 재연장하기 때문에, 이 구간은 프라이머 서열과 원 주형의 "
-         "혼합이 됩니다. 그래서 양끝 3 nt 를 제외하고 채점합니다."],
+        ["프라이머 판별", "CDR3 경계 (F1_Rev / F2_For)", _doc_cdr3_boundary(primers)],
         ["프라이머 판별", "CDR3경계 값 OK / 부정합 / pool / 앵커없음",
          "OK = FR1 이 부른 family 와 정합. 부정합 = frag1/frag2 이종 조립 의심(약한 증거). "
          "pool = fragment 1·2 를 pool 로 PCR 했다고 설정해 검사를 생략. "

@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.3"
+VERIFY_VERSION = "3.4"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -916,6 +916,49 @@ def check_ambig_family_flag(report, core, html):
     report.ok("B", "모호성 플래그 처리", not bad,
               "AMBIG_FAMILY? · AMBIG_CALL? 모두 심각도 2 · 용어설명 · badge b-check",
               " / ".join(bad))
+
+
+# (다) 로 남긴 항목 — 이름이 데이터가 아니라 설계상 고정된 요소라 그대로 둡니다.
+# 예외로 두되 그 이름이 실제로 FASTA 에 있는지도 확인합니다. 없는 이름을 예외로
+# 두면 오타가 영구히 숨습니다.
+GLOSSARY_NAME_OK = ("For-Over", "Rev-Over")
+
+
+def check_glossary_primer_names(report, core):
+    """용어설명에 프라이머 이름이 리터럴로 박혀 있지 않은가."""
+    src = os.path.join(ROOT, TESTDATA, "scFv_primers.fa")
+    if not os.path.isfile(src):
+        report.add("B", "용어설명의 프라이머 이름", SKIP,
+                   "testdata/scFv_primers.fa 가 없습니다")
+        return
+    with io.open(src, encoding="utf-8", errors="ignore") as fh:
+        primers, _t, _w = core.parse_primer_fasta(fh.read())
+    names = set(p["name"] for p in primers)
+    cfg = core.build_config(None, [])
+    bad = []
+    # 예외 이름이 실제로 존재하는지 먼저 본다
+    missing = [n for n in GLOSSARY_NAME_OK if n not in names]
+    if missing:
+        bad.append("예외 이름이 FASTA 에 없음: " + ", ".join(missing))
+    # 프라이머 없이 만든 용어설명에는 이름이 하나도 없어야 한다
+    leaked = set()
+    for _c, t, d in core.glossary():
+        for n in names:
+            if n in d and not any(n in ok or ok in n for ok in GLOSSARY_NAME_OK):
+                leaked.add((t, n))
+    if leaked:
+        bad.append("프라이머 없이 만든 설명에 남아 있음: " +
+                   ", ".join("%s/%s" % x for x in sorted(leaked)[:6]))
+    # 프라이머를 넣으면 예시가 실제로 채워져야 한다
+    filled = dict((t, d) for _c, t, d in core.glossary(primers, cfg))
+    for t in ("Δ (차순위 간격)", "모호성 표기", "CDR3 경계 (F1_Rev / F2_For)"):
+        if t not in filled:
+            bad.append("항목 없음: " + t)
+        elif not any(n in filled[t] for n in names):
+            bad.append("예시가 안 채워짐: " + t)
+    report.ok("B", "용어설명의 프라이머 이름", not bad,
+              "예외 %s 는 FASTA 에 존재 · 나머지는 런타임 선택"
+              % ", ".join(GLOSSARY_NAME_OK), " / ".join(bad))
 
 
 def check_negctrl_vocab(report, core, html):
@@ -1997,6 +2040,72 @@ def check_ambig_call_units(report, core):
               "후보 1 개(다중 표적)는 안 붙음", " / ".join(bad))
 
 
+def check_doc_example_units(report, core):
+    """용어설명 예시 선택 규칙. 조건에 맞는 쌍을 고르고, 없으면 폴백한다."""
+    cfg = core.build_config(None, [])
+
+    def prim(name, seq, fam, group, chain="heavy"):
+        return {"name": name, "seq": seq, "core": seq, "core_trim": 0, "len": len(seq),
+                "group": group, "chain": chain, "family": fam, "families": [fam],
+                "target": "", "fragment": "", "dir": "", "tm": ""}
+
+    base = "ACGTACGTACGTACGT"
+    one = "C" + base[1:]                       # 비호환 1 곳
+    two = "C" + base[1:5] + "A" + base[6:]     # 비호환 2 곳
+    one2 = base[:8] + "C" + base[9:]           # 비호환 1 곳 (다른 자리)
+    far = "CTGACTGACTGACTGA"                   # 비호환이 2T 를 넘어 후보에서 빠짐
+    bad = []
+
+    # Δ : F2_Rev 에서 비호환이 가장 적은 쌍을 고른다.
+    # 후보가 한 쌍뿐이면 정렬 방향을 시험할 수 없으므로 2T 안에 여러 쌍을 둔다.
+    pl = [prim("rA", base, "JH1", "F2_Rev"), prim("rB", one, "JH2", "F2_Rev"),
+          prim("rC", two, "JH3", "F2_Rev"), prim("rD", one2, "JH4", "F2_Rev")]
+    seen = core.primer_ambiguity(pl, cfg)
+    inc = sorted(set(d["incompatible"] for d in seen))
+    if len(seen) < 3 or len(inc) < 2:
+        bad.append("Δ 시험 자료가 후보 %d 쌍 · 비호환 %s 로 정렬을 시험 못 함"
+                   % (len(seen), inc))
+    got = core._pick_delta_pair(pl, cfg)
+    if not got or (got["a"], got["b"]) != ("rA", "rB"):
+        bad.append("Δ 예시 %s (기대 rA/rB)" % (str(got and (got["a"], got["b"])),))
+    # 조건에 맞는 쌍이 없으면 None -> 예시 없이 서술
+    txt = core._doc_delta([prim("rA", base, "JH1", "F2_Rev")], cfg)
+    if "판별구간" in txt:
+        bad.append("F2_Rev 쌍이 없는데 예시 문장이 들어감")
+
+    # 모호성 표기 : certain + same_family + 채점 그룹
+    pl = [prim("fA", base, "VH1", "F1_For"), prim("fB", one, "VH1", "F1_For"),
+          prim("fC", far, "VH2", "F1_For")]
+    got = core._pick_same_family_pair(pl, cfg)
+    if not got or (got["a"], got["b"]) != ("fA", "fB"):
+        bad.append("모호성 예시 %s (기대 fA/fB)" % (str(got and (got["a"], got["b"])),))
+    # same_family 쌍이 없으면 폴백 문장
+    txt = core._doc_ambig_notation(
+        [prim("fA", base, "VH1", "F1_For"), prim("fB", one, "VH2", "F1_For")], cfg)
+    if not txt.startswith("family (프라이머 후보들)"):
+        bad.append("same_family 쌍이 없는데 폴백이 안 됨 : " + txt[:30])
+
+    # CDR3 경계 : 다른 family 를 완전히 포함하는 쌍
+    sup = "ACGTACGTACGTACGN"                   # 마지막 자리가 N 이라 base 를 포함
+    pl = [prim("s1", sup, "VH1", "F1_Rev"), prim("s2", base, "VH2", "F1_Rev")]
+    hit = core._pick_superset_pair(pl)
+    if not hit or (hit[1]["name"], hit[2]["name"]) != ("s1", "s2"):
+        bad.append("포함 쌍 %s (기대 s1 ⊇ s2)"
+                   % (str(hit and (hit[1]["name"], hit[2]["name"])),))
+    # 같은 family 끼리는 고르지 않는다
+    same = [prim("s1", sup, "VH1", "F1_Rev"), prim("s2", base, "VH1", "F1_Rev")]
+    if core._pick_superset_pair(same) is not None:
+        bad.append("같은 family 인데 포함 쌍으로 골랐음")
+    # 포함 쌍이 없으면 일반 서술로 폴백
+    txt = core._doc_cdr3_boundary([prim("s2", base, "VH2", "F1_Rev")])
+    if "일부 프라이머의 축퇴 공간이" not in txt:
+        bad.append("포함 쌍이 없는데 폴백이 안 됨")
+
+    report.ok("E", "용어설명 예시 선택 단위", not bad,
+              "Δ 는 최소 비호환 쌍 · 모호성은 certain+같은 family · CDR3 는 완전 포함 쌍 · "
+              "없으면 폴백", " / ".join(bad))
+
+
 def check_badge_states(report, js):
     body = js_function_body(js, "badge")
     if body is None:
@@ -2848,6 +2957,8 @@ def main():
         guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
         guard(report, "B", "모호성 항목이 런타임 계산인가",
               check_ambiguity_runtime, report, core)
+        guard(report, "B", "용어설명의 프라이머 이름",
+              check_glossary_primer_names, report, core)
         guard(report, "B", "모호성 플래그 처리", check_ambig_family_flag,
               report, core, html)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
@@ -2887,6 +2998,7 @@ def main():
               report, core)
         guard(report, "E", "커버리지 기대 대상 단위", check_coverage_assigned_units,
               report, core)
+        guard(report, "E", "용어설명 예시 선택 단위", check_doc_example_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 
