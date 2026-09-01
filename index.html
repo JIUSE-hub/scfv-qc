@@ -159,6 +159,22 @@ td.mono{font-family:var(--mono);font-size:12px}
 .gitem .d code{font-family:var(--mono);font-size:11.5px;background:var(--snu-tint2);
                padding:1px 4px;border-radius:3px;word-break:break-all}
 @media(max-width:700px){.gitem{grid-template-columns:1fr;gap:3px}}
+/* ---------- 배치 카드 ---------- */
+.bcard{border:1px solid var(--line);border-radius:9px;margin-bottom:12px;overflow:hidden}
+.bcard>.h{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+          padding:10px 14px;background:#fcfdfe;border-bottom:1px solid var(--line)}
+.bcard>.h .t{font-size:12px;font-weight:600;color:var(--snu-dark);min-width:52px}
+.bcard>.h label{font-size:11.5px;color:var(--muted)}
+.bcard>.h select{font-size:12px;padding:3px 6px;border:1px solid var(--line);border-radius:5px}
+.bcard>.b{padding:12px 14px}
+.bcard .rm{margin-left:auto;font-size:11.5px;color:var(--fail);background:none;
+           border:1px solid var(--line);border-radius:5px;padding:3px 9px;cursor:pointer}
+.bcard .rm[disabled]{color:var(--muted);cursor:not-allowed}
+.grp-h{display:flex;align-items:baseline;gap:9px;margin:16px 0 8px;
+       font-size:12.5px;font-weight:600;color:var(--snu-dark)}
+.grp-h .m{font-weight:400;color:var(--muted);font-size:12px}
+.exp{color:var(--muted)}
+.ng{color:var(--fail);font-weight:600}
 .constrow{display:grid;grid-template-columns:190px 1fr;gap:16px;padding:8px 0;
           border-top:1px dotted var(--line);font-size:12.5px}
 .constrow:first-child{border-top:0}
@@ -185,21 +201,32 @@ footer{text-align:center;font-size:11.5px;color:var(--muted);padding:0 0 30px}
   <!-- 1. 입력 -->
   <section>
     <div class="sec-h"><span class="n">1</span><h2>입력</h2>
-      <span class="hint">.ab1 파일과 프라이머 FASTA 를 올려주세요</span></div>
+      <span class="hint">프라이머 FASTA 를 먼저 올리면 배치를 구성할 수 있습니다</span></div>
+    <div class="tabs" id="modeTabs"></div>
     <div class="sec-b">
-      <div class="drops">
+      <div class="note" id="modeDesc"></div>
+      <div class="drop" id="dropFa">
+        <div class="t">프라이머 FASTA</div>
+        <div class="d">클릭하거나 끌어다 놓기 &middot; 1 개 &middot; 두 모드 공통</div>
+        <input type="file" id="inFa" accept=".fa,.fasta,.fas,.txt" class="hidden">
+      </div>
+      <div class="filelist" id="faList"></div>
+
+      <div id="paneWhole" style="margin-top:14px">
         <div class="drop" id="dropAb1">
           <div class="t">Sanger 판독 파일 (.ab1)</div>
-          <div class="d">클릭하거나 끌어다 놓기 &middot; 여러 개 가능</div>
+          <div class="d">클릭하거나 끌어다 놓기 &middot; 여러 개 가능 &middot; 파일명이 클론 ID 가 됩니다</div>
           <input type="file" id="inAb1" multiple accept=".ab1" class="hidden">
         </div>
-        <div class="drop" id="dropFa">
-          <div class="t">프라이머 FASTA</div>
-          <div class="d">클릭하거나 끌어다 놓기 &middot; 1 개</div>
-          <input type="file" id="inFa" accept=".fa,.fasta,.fas,.txt" class="hidden">
-        </div>
+        <div class="filelist" id="fileList"></div>
       </div>
-      <div class="filelist" id="fileList"></div>
+
+      <div id="paneBatch" class="hidden" style="margin-top:14px">
+        <div class="note" id="batchNote"></div>
+        <div id="batchList"></div>
+        <button class="btn ghost sm" id="btnAddBatch" style="margin-top:10px">+ 배치 추가</button>
+      </div>
+
       <div class="bar" style="margin-top:14px">
         <button class="btn ghost sm" id="btnDefFa">기본 프라이머 목록 불러오기</button>
         <button class="btn ghost sm" id="btnClear">전체 지우기</button>
@@ -245,6 +272,7 @@ footer{text-align:center;font-size:11.5px;color:var(--muted);padding:0 0 30px}
         <button class="btn ghost sm" id="dlFa">fasta</button>
       </div>
       <div class="tblwrap"><table id="resTbl"></table></div>
+      <div id="resGroups"></div>
       <div id="resDetail" style="margin-top:16px"></div>
       <div id="resComp" style="margin-top:20px"></div>
     </div>
@@ -275,9 +303,19 @@ const PYODIDE_BASE = "https://cdn.jsdelivr.net/pyodide/v314.0.5/full/";
 const PYODIDE_VER  = "v314.0.5";
 const DEFAULT_FA   = "scFv_primers.fa";
 
-let py = null, DOC = null, SCAN = null, OUT = null, COLMODE = "compact";
-const ab1Files = new Map();      // name -> File
+let py = null, DOC = null, SCAN = null, RUN = null, COLMODE = "compact";
 let faFile = null, faText = "";
+
+/* 모드 선택. 값은 core 의 MODE_OPTS 에서 오고, 화면 이름만 여기서 붙입니다.
+   0 = 배치 지정, 1 = 라이브러리 전체 (core.MODE_OPTS 순서). */
+const MODE_NAMES = ["Assigned batch", "Library"];
+let modeIdx = 0;
+const isBatchMode = () => modeIdx === 0;
+
+const wholeFiles = new Map();    // 라이브러리 모드 : name -> File
+let cards = [];                  // 배치 모드 : [{id, vh, chain, files:Map}]
+let nextCardId = 1;
+const cardDir = (c) => "/input/b" + c.id;
 
 const $  = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -309,12 +347,13 @@ import json, os, sys
 sys.path.insert(0, "/app")
 import core, xlsx_writer
 
-def _inputs():
+def _inputs_from(d):
     fs = []
-    if os.path.isdir("/input"):
-        for n in sorted(os.listdir("/input")):
-            if n.lower().endswith(".ab1"):
-                with open("/input/" + n, "rb") as fh:
+    if os.path.isdir(d):
+        for n in sorted(os.listdir(d)):
+            p = d + "/" + n
+            if n.lower().endswith(".ab1") and os.path.isfile(p):
+                with open(p, "rb") as fh:
                     fs.append((n, fh.read()))
     return fs
 
@@ -340,29 +379,142 @@ def js_docs():
                     "default": core.DESIGN_DEFAULT_MAP[k]}
                    for k, lab, memo in core.DESIGN_DOC],
         "poolOpts": core.POOL_OPTS, "cdnaOpts": core.CDNA_OPTS, "nosel": core.NOSEL,
+        # core.MODE_OPTS 의 순서를 그대로 씁니다. [0] 배치 지정, [1] 라이브러리 전체.
+        # 순서가 뒤집히면 verify.py 의 [B] 가 잡습니다.
+        "modeOpts": list(core.MODE_OPTS),
         "version": {"core": core.CORE_VERSION, "notebook": core.NB_VERSION,
                     "writer": xlsx_writer.WRITER_VERSION, "python": sys.version.split()[0]},
     }, ensure_ascii=False)
 
-def js_scan():
-    return json.dumps(core.scan_inputs(_inputs(), _primer_text()),
+def js_scan(dirs_json):
+    fs = []
+    for d in json.loads(dirs_json):
+        fs.extend(_inputs_from(d))
+    return json.dumps(core.scan_inputs(fs, _primer_text()),
                       ensure_ascii=False, default=str)
 
+def _write_output(sheets, headers, rows, fasta):
+    os.makedirs("/output", exist_ok=True)
+    with open("/output/book.xlsx", "wb") as fh:
+        fh.write(xlsx_writer.write_xlsx(sheets))
+    with open("/output/summary.csv", "wb") as fh:
+        fh.write(xlsx_writer.build_csv(headers, rows))
+    with open("/output/inserts.fa", "wb") as fh:
+        fh.write(fasta.encode("utf-8"))
+
 def js_analyze(cfg_json, meta_json):
-    out = core.analyze(_inputs(), _primer_text(),
+    out = core.analyze(_inputs_from("/input"), _primer_text(),
                        json.loads(cfg_json), json.loads(meta_json))
     if out.get("ok"):
-        os.makedirs("/output", exist_ok=True)
-        with open("/output/book.xlsx", "wb") as fh:
-            fh.write(xlsx_writer.write_xlsx(out["sheets"]))
-        with open("/output/summary.csv", "wb") as fh:
-            fh.write(xlsx_writer.build_csv(out["summary"]["headers"],
-                                           out["summary"]["rows"]))
-        with open("/output/inserts.fa", "wb") as fh:
-            fh.write(out["fasta"].encode("utf-8"))
+        _write_output(out["sheets"], out["summary"]["headers"],
+                      out["summary"]["rows"], out["fasta"])
         out = dict(out)
         out.pop("sheets", None)
     return json.dumps(out, ensure_ascii=False, default=str)
+
+def _sheet_at(sheets, prefix):
+    for i, s in enumerate(sheets):
+        if str(s.get("title", "")).startswith(prefix):
+            return i
+    return -1
+
+def js_analyze_batches(batches_json, cfg_json, meta_json):
+    """배치마다 core.analyze 를 부르고 결과를 하나로 묶습니다. 판정은 전부 core 가 합니다."""
+    specs = json.loads(batches_json)
+    base = json.loads(cfg_json)
+    meta = json.loads(meta_json)
+    ptxt = _primer_text()
+    label = str(meta.get("batch_label", "") or "")
+
+    done, errs = [], []
+    for i, sp in enumerate(specs):
+        cfg = dict(base)
+        cfg["analysis_mode"] = core.MODE_ASSIGNED
+        cfg["batch_vh_family"] = sp.get("vh") or core.NOSEL
+        cfg["batch_chain"] = sp.get("chain") or core.NOSEL
+        # 같은 VH x 경쇄 카드를 여러 개 만들 수 있으므로 순번을 함께 넣습니다.
+        tag = "B%d %s x %s" % (i + 1, cfg["batch_vh_family"], cfg["batch_chain"])
+        m = dict(meta)
+        m["batch_label"] = (label + " / " + tag) if label else tag
+        res = core.analyze(_inputs_from(sp["dir"]), ptxt, cfg, m)
+        if not res.get("ok"):
+            errs.append(m["batch_label"] + " : " + "; ".join(res.get("errors", [])))
+            continue
+        done.append({"vh": cfg["batch_vh_family"], "chain": cfg["batch_chain"],
+                     "label": m["batch_label"],
+                     "design_hash": res["config"]["design_hash"], "result": res})
+    if errs:
+        return json.dumps({"ok": False, "errors": errs}, ensure_ascii=False, default=str)
+    if not done:
+        return json.dumps({"ok": False, "errors": ["분석할 배치가 없습니다."]},
+                          ensure_ascii=False, default=str)
+
+    hashes = sorted(set(b["result"]["config"]["param_hash"] for b in done))
+    if len(hashes) > 1:
+        return json.dumps({"ok": False, "errors":
+                           ["배치 간 param_hash 가 다릅니다 : " + ", ".join(hashes)]},
+                          ensure_ascii=False, default=str)
+
+    res0 = done[0]["result"]
+    # 전체 조성은 모든 배치의 calls 를 모아 core.compose 를 다시 부릅니다.
+    lib_over = dict(base)
+    lib_over["analysis_mode"] = core.MODE_LIBRARY
+    lib_cfg = core.build_config(lib_over, [b["label"] for b in done])
+    all_calls = []
+    for b in done:
+        all_calls.extend(b["result"]["calls"])
+    comp_all = core.compose(all_calls, lib_cfg)
+    # 전체 04 블록도 core 가 만들게 합니다. 빈 qc/calls 를 넘기면 04 만 채워집니다.
+    all04 = core.build_sheets([], [], lib_cfg, comp_all, meta)
+    rows04_all = all04[_sheet_at(all04, "04")]["rows"]
+
+    sheets = []
+    for i, sh in enumerate(res0["sheets"]):
+        title = str(sh.get("title", ""))
+        new = dict(sh)
+        if title[:2] in ("01", "02", "03", "07"):
+            rows = []
+            for b in done:
+                rows.extend(b["result"]["sheets"][i]["rows"])
+            new["rows"] = rows
+        elif title.startswith("04"):
+            rows = []
+            for b in done:
+                rows.append(["배치", b["label"], "",
+                             "design_hash %s" % b["design_hash"]])
+                rows.extend(b["result"]["sheets"][i]["rows"])
+            rows.append(["배치", "전체 합계", "",
+                         "모든 배치를 합쳐 다시 집계한 값. VH family 와 경쇄는 "
+                         "배치별로 고정되므로 위 배치별 블록을 함께 보세요."])
+            rows.extend(rows04_all)
+            new["rows"] = rows
+        elif title.startswith("05"):
+            rows = list(sh["rows"])
+            for b in done:
+                rows.append(["배치별 설계", b["label"],
+                             "%s / %s" % (b["vh"], b["chain"]), "", "",
+                             "design_hash %s" % b["design_hash"]])
+            new["rows"] = rows
+        sheets.append(new)
+
+    headers = res0["summary"]["headers"]
+    rows = []
+    for b in done:
+        rows.extend(b["result"]["summary"]["rows"])
+    fasta = "".join(b["result"]["fasta"] for b in done)
+    _write_output(sheets, headers, rows, fasta)
+
+    for b in done:
+        b["result"] = dict(b["result"])
+        b["result"].pop("sheets", None)
+    return json.dumps({
+        "ok": True, "errors": [],
+        "param_hash": hashes[0],
+        "batches": done,
+        "merged": {"summary": {"headers": headers, "rows": rows},
+                   "composition": comp_all, "config": res0["config"],
+                   "fasta": fasta},
+    }, ensure_ascii=False, default=str)
 `;
 
 async function boot(){
@@ -381,7 +533,7 @@ async function boot(){
     py.runPython(GLUE);
     DOC = JSON.parse(py.runPython("js_docs()"));
 
-    buildThresholdForm(); buildDesignForm(); buildDocs();
+    buildThresholdForm(); buildDesignForm(); buildDocs(); buildModeTabs();
     $("#verline").textContent =
       "core " + DOC.version.core + "  ·  xlsx_writer " + DOC.version.writer +
       "  ·  기준 노트북 v" + DOC.version.notebook +
@@ -443,11 +595,15 @@ function buildDesignForm(){
     .forEach(k => h += fld(k, segHTML(k, DOC.poolOpts, byKey[k].default)));
   h += "</div>" + chk("f3_product_pooled", 12, true) + "</div>";
 
-  h += '<div class="grp"><h3>이번 배치</h3>' +
-    '<div class="note">파일명에서 자동 추정합니다. 다르면 바꾸세요. ' +
-    '&ldquo;' + esc(DOC.nosel) + '&rdquo; 이면 교차오염 검사를 건너뜁니다.</div><div class="grid">' +
-    fld("batch_vh_family", '<select id="dz_batch_vh_family"></select>') +
-    fld("batch_chain", '<select id="dz_batch_chain"></select>') + "</div></div>";
+  h += '<div class="grp"><h3>이번 실행</h3>' +
+    '<div class="note">결과 파일명과 05_실행설정 기록에 쓰입니다. ' +
+    'VH family 와 경쇄는 위 입력 섹션의 배치 카드에서 지정합니다.</div><div class="grid">' +
+    '<div class="fld"><label for="mt_batch_label">배치명</label>' +
+    '<input type="text" id="mt_batch_label" placeholder="예: 260819_VH6-VK">' +
+    '<span class="desc">결과 파일명 접두어와 01_판정요약의 batch 열</span></div>' +
+    '<div class="fld"><label for="mt_batch_date">날짜</label>' +
+    '<input type="text" id="mt_batch_date" placeholder="YYMMDD 또는 자유 형식">' +
+    '<span class="desc">01_판정요약의 date 열</span></div></div></div>';
 
   h += '<div class="grp"><h3>cDNA 합성 / RNA 출처</h3>' +
     '<div class="note">판정에는 쓰이지 않고 결과 파일에 기록만 됩니다.</div><div class="grid">';
@@ -464,17 +620,6 @@ function buildDesignForm(){
     b.classList.add("on"); onCfgChange();
   }));
   p.querySelectorAll("select,input").forEach(i => i.addEventListener("change", onCfgChange));
-  fillBatchOptions([DOC.nosel], [DOC.nosel], {});
-}
-
-function fillBatchOptions(vhOpts, chOpts, guess){
-  const set = (id, opts, val) => {
-    const s = $("#" + id); if (!s) return;
-    s.innerHTML = opts.map(o => "<option" + (o === val ? " selected" : "") + ">" +
-      esc(o) + "</option>").join("");
-  };
-  set("dz_batch_vh_family", vhOpts, guess.vh || DOC.nosel);
-  set("dz_batch_chain", chOpts, guess.chain || DOC.nosel);
 }
 
 function readConfig(){
@@ -490,9 +635,120 @@ function readConfig(){
   });
   ["f3_product_pooled","rna_bone_marrow","rna_peripheral"].forEach(k =>
     cfg[k] = $("#dz_" + k).checked);
-  ["batch_vh_family","batch_chain","cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k =>
-    cfg[k] = $("#dz_" + k).value);
+  ["cdna_frag1","cdna_frag2","cdna_frag3"].forEach(k => cfg[k] = $("#dz_" + k).value);
+  // batch_vh_family / batch_chain 은 배치 카드에서 정해 js_analyze_batches 가 넣습니다.
+  cfg["analysis_mode"] = DOC.modeOpts[modeIdx];
   return cfg;
+}
+
+function readMeta(){
+  return {
+    runtime: "브라우저 / Pyodide " + PYODIDE_VER,
+    timestamp: new Date().toISOString().slice(0,19).replace("T"," "),
+    primer_file: faFile ? faFile.name : "",
+    batch_label: ($("#mt_batch_label") || {}).value || "",
+    batch_date: ($("#mt_batch_date") || {}).value || ""
+  };
+}
+
+/* ---------- 모드 탭 ---------- */
+function buildModeTabs(){
+  const byKey = {}; DOC.design.forEach(d => byKey[d.key] = d);
+  $("#modeTabs").innerHTML = DOC.modeOpts.map((v, i) =>
+    '<button class="tab' + (i === modeIdx ? " on" : "") + '" data-i="' + i + '">' +
+    esc(MODE_NAMES[i] || v) + "</button>").join("");
+  $("#modeDesc").textContent = byKey["analysis_mode"] ? byKey["analysis_mode"].desc : "";
+  $$("#modeTabs .tab").forEach(b => b.addEventListener("click", () => {
+    modeIdx = parseInt(b.dataset.i, 10);
+    $$("#modeTabs .tab").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    applyMode();
+    syncAndScan();
+  }));
+  applyMode();
+}
+
+function applyMode(){
+  $("#paneWhole").classList.toggle("hidden", isBatchMode());
+  $("#paneBatch").classList.toggle("hidden", !isBatchMode());
+  $("#secRes").classList.add("hidden");
+  if (isBatchMode() && !cards.length) addCard();
+  renderCards();
+}
+
+/* ---------- 배치 카드 ---------- */
+function vhOpts(){ return (SCAN && SCAN.options.vh_family) || [DOC.nosel]; }
+function chOpts(){ return (SCAN && SCAN.options.chain) || [DOC.nosel]; }
+function primerReady(){ return !!(SCAN && SCAN.primer_n > 0); }
+
+function addCard(){
+  cards.push({id: nextCardId++, vh: "", chain: "", files: new Map()});
+}
+
+function renderCards(){
+  if (!isBatchMode()) return;
+  const ready = primerReady();
+  $("#batchNote").textContent = ready
+    ? "배치마다 VH family 와 경쇄를 지정하고 그 배치의 .ab1 을 올립니다. 파일명이 클론 ID 가 됩니다."
+    : "프라이머 FASTA 를 먼저 올려주세요. VH family 와 경쇄 선택지를 거기서 읽어옵니다.";
+  $("#btnAddBatch").disabled = !ready;
+
+  const opt = (list, cur) => list.map(o =>
+    "<option" + (o === cur ? " selected" : "") + ">" + esc(o) + "</option>").join("");
+  $("#batchList").innerHTML = cards.map((c, i) => {
+    const rows = Array.from(c.files.values())
+      .sort((a,b) => a.name.localeCompare(b.name)).map(f =>
+      '<div class="filerow"><span class="nm">' + esc(f.name) + "</span>" +
+      '<span class="sz">' + (f.size/1024).toFixed(0) + " KB</span>" +
+      '<button data-cf="' + c.id + '" data-nm="' + esc(f.name) + '">&times;</button></div>');
+    return '<div class="bcard"><div class="h"><span class="t">배치 ' + (i+1) + "</span>" +
+      '<label>VH family</label><select data-cvh="' + c.id + '">' +
+        opt(vhOpts(), c.vh) + "</select>" +
+      '<label>경쇄</label><select data-cch="' + c.id + '">' +
+        opt(chOpts(), c.chain) + "</select>" +
+      '<button class="rm" data-crm="' + c.id + '"' +
+        (cards.length > 1 ? "" : " disabled") + ">삭제</button></div>" +
+      '<div class="b"><div class="drop" data-cdrop="' + c.id + '">' +
+        '<div class="t">이 배치의 .ab1</div><div class="d">클릭하거나 끌어다 놓기 &middot; ' +
+        c.files.size + ' 개</div>' +
+        '<input type="file" multiple accept=".ab1" class="hidden" data-cin="' + c.id + '">' +
+      "</div>" + (rows.length ? '<div class="filelist">' + rows.join("") + "</div>" : "") +
+      "</div></div>";
+  }).join("");
+
+  const byId = (id) => cards.find(c => c.id === parseInt(id, 10));
+  $$("#batchList [data-cvh]").forEach(s => s.addEventListener("change",
+    () => { byId(s.dataset.cvh).vh = s.value; }));
+  $$("#batchList [data-cch]").forEach(s => s.addEventListener("change",
+    () => { byId(s.dataset.cch).chain = s.value; }));
+  $$("#batchList [data-crm]").forEach(b => b.addEventListener("click", () => {
+    if (cards.length <= 1) return;
+    cards = cards.filter(c => c.id !== parseInt(b.dataset.crm, 10));
+    syncAndScan();
+  }));
+  $$("#batchList [data-cf]").forEach(b => b.addEventListener("click", () => {
+    byId(b.dataset.cf).files.delete(b.dataset.nm); syncAndScan();
+  }));
+  $$("#batchList [data-cdrop]").forEach(z => {
+    const c = byId(z.dataset.cdrop);
+    const inp = z.querySelector("[data-cin]");
+    z.addEventListener("click", () => inp.click());
+    inp.addEventListener("change", () => { takeAb1(c.files, Array.from(inp.files)); inp.value = ""; });
+    ["dragenter","dragover"].forEach(e => z.addEventListener(e, ev => {
+      ev.preventDefault(); z.classList.add("over"); }));
+    ["dragleave","drop"].forEach(e => z.addEventListener(e, ev => {
+      ev.preventDefault(); z.classList.remove("over"); }));
+    z.addEventListener("drop", ev => takeAb1(c.files, Array.from(ev.dataTransfer.files)));
+  });
+}
+
+function takeAb1(map, fs){
+  fs.filter(f => f.name.toLowerCase().endsWith(".ab1")).forEach(f => map.set(f.name, f));
+  const bad = fs.filter(f => !f.name.toLowerCase().endsWith(".ab1"));
+  if (bad.length) showErr(".ab1 이 아닌 파일은 제외했습니다: " + bad.map(f => f.name).join(", "),
+    "품질값(Q)과 크로마토그램이 없는 .seq 텍스트로는 판정의 절반을 수행할 수 없습니다.");
+  else clearErr();
+  syncAndScan();
 }
 
 function onCfgChange(){
@@ -527,19 +783,14 @@ function bindDrop(zoneId, inputId, handler){
     ev.preventDefault(); z.classList.remove("over"); }));
   z.addEventListener("drop", ev => handler(Array.from(ev.dataTransfer.files)));
 }
-bindDrop("dropAb1", "inAb1", fs => {
-  fs.filter(f => f.name.toLowerCase().endsWith(".ab1")).forEach(f => ab1Files.set(f.name, f));
-  const bad = fs.filter(f => !f.name.toLowerCase().endsWith(".ab1"));
-  if (bad.length) showErr(".ab1 이 아닌 파일은 제외했습니다: " +
-    bad.map(f => f.name).join(", "),
-    "품질값(Q)과 크로마토그램이 없는 .seq 텍스트로는 판정의 절반을 수행할 수 없습니다.");
-  else clearErr();
-  syncAndScan();
-});
+bindDrop("dropAb1", "inAb1", fs => takeAb1(wholeFiles, fs));
 bindDrop("dropFa", "inFa", fs => { if (fs[0]){ faFile = fs[0]; faText = ""; syncAndScan(); } });
 
+$("#btnAddBatch").addEventListener("click", () => { addCard(); syncAndScan(); });
+
 $("#btnClear").addEventListener("click", () => {
-  ab1Files.clear(); faFile = null; faText = "";
+  wholeFiles.clear(); cards = []; faFile = null; faText = "";
+  if (isBatchMode()) addCard();
   $("#secRes").classList.add("hidden"); clearErr(); syncAndScan();
 });
 $("#btnDefFa").addEventListener("click", async () => {
@@ -555,66 +806,94 @@ $("#btnDefFa").addEventListener("click", async () => {
 });
 
 function renderFiles(){
-  const rows = [];
-  Array.from(ab1Files.values()).sort((a,b) => a.name.localeCompare(b.name)).forEach(f =>
-    rows.push('<div class="filerow"><span class="nm">' + esc(f.name) + "</span>" +
-      '<span class="sz">' + (f.size/1024).toFixed(0) + " KB</span>" +
-      '<button data-rm="' + esc(f.name) + '" title="제거">&times;</button></div>'));
-  if (faFile)
-    rows.push('<div class="filerow"><span class="nm">' + esc(faFile.name) +
-      "</span><span class=\"sz\">프라이머</span>" +
-      '<button data-rmfa="1" title="제거">&times;</button></div>');
+  $("#faList").innerHTML = faFile
+    ? '<div class="filerow"><span class="nm">' + esc(faFile.name) +
+      '</span><span class="sz">프라이머</span>' +
+      '<button data-rmfa="1" title="제거">&times;</button></div>' : "";
+  $$("#faList [data-rmfa]").forEach(b => b.addEventListener("click", () => {
+    faFile = null; faText = ""; syncAndScan(); }));
+
+  const rows = Array.from(wholeFiles.values())
+    .sort((a,b) => a.name.localeCompare(b.name)).map(f =>
+    '<div class="filerow"><span class="nm">' + esc(f.name) + "</span>" +
+    '<span class="sz">' + (f.size/1024).toFixed(0) + " KB</span>" +
+    '<button data-rm="' + esc(f.name) + '" title="제거">&times;</button></div>');
   $("#fileList").innerHTML = rows.join("");
   $$("#fileList [data-rm]").forEach(b => b.addEventListener("click", () => {
-    ab1Files.delete(b.dataset.rm); syncAndScan(); }));
-  $$("#fileList [data-rmfa]").forEach(b => b.addEventListener("click", () => {
-    faFile = null; faText = ""; syncAndScan(); }));
+    wholeFiles.delete(b.dataset.rm); syncAndScan(); }));
+  renderCards();
+}
+
+function clearDir(d){
+  try{ py.FS.mkdirTree(d); }catch(e){}
+  for (const n of py.FS.readdir(d)){
+    if (n === "." || n === "..") continue;
+    const p = d + "/" + n;
+    try{
+      if (py.FS.isDir(py.FS.stat(p).mode)) { clearDir(p); py.FS.rmdir(p); }
+      else py.FS.unlink(p);
+    }catch(e){}
+  }
+}
+
+function totalFiles(){
+  return isBatchMode()
+    ? cards.reduce((n, c) => n + c.files.size, 0)
+    : wholeFiles.size;
 }
 
 async function syncAndScan(){
   renderFiles(); refreshRunnable();
   if (!py) return;
-  try{ py.FS.mkdirTree("/input"); }catch(e){}
-  for (const n of py.FS.readdir("/input")){
-    if (n !== "." && n !== "..") { try{ py.FS.unlink("/input/" + n); }catch(e){} }
+  clearDir("/input");
+  const dirs = [];
+  if (isBatchMode()){
+    for (const c of cards){
+      py.FS.mkdirTree(cardDir(c)); dirs.push(cardDir(c));
+      for (const f of c.files.values())
+        py.FS.writeFile(cardDir(c) + "/" + f.name, new Uint8Array(await f.arrayBuffer()));
+    }
+  }else{
+    dirs.push("/input");
+    for (const f of wholeFiles.values())
+      py.FS.writeFile("/input/" + f.name, new Uint8Array(await f.arrayBuffer()));
   }
-  for (const f of ab1Files.values())
-    py.FS.writeFile("/input/" + f.name, new Uint8Array(await f.arrayBuffer()));
   if (faFile)
     py.FS.writeFile("/input/_primers.fa", new TextEncoder().encode(
       faText || await faFile.text()));
 
-  if (!ab1Files.size && !faFile){ $("#scanMsg").textContent = ""; $("#scanWarn").innerHTML = ""; return; }
+  if (!totalFiles() && !faFile){
+    SCAN = null; $("#scanMsg").textContent = ""; $("#scanWarn").innerHTML = "";
+    renderCards(); refreshRunnable(); return;
+  }
   try{
-    SCAN = JSON.parse(py.runPython("js_scan()"));
+    py.globals.set("_dirs_json", JSON.stringify(dirs));
+    SCAN = JSON.parse(py.runPython("js_scan(_dirs_json)"));
     const g = SCAN.primer_groups.length;
     $("#scanMsg").textContent =
       "read " + SCAN.reads.length + " 개 · 프라이머 " + SCAN.primer_n + " 종" +
       (g ? " (" + g + " 그룹)" : "") +
-      (SCAN.batches.length ? " · 배치 " + SCAN.batches.join(", ") : "");
-    fillBatchOptions(SCAN.options.vh_family, SCAN.options.chain, SCAN.guess);
+      (isBatchMode() ? " · 배치 " + cards.length + " 개" : "");
     const w = [];
     SCAN.read_errors.forEach(e => w.push("읽기 실패 &middot; " + esc(e)));
     SCAN.primer_unknown.forEach(n => w.push("그룹 미판정 프라이머 &middot; " + esc(n)));
-    SCAN.reads.filter(r => !r.parsed).forEach(r =>
-      w.push("파일명이 규격과 다릅니다 &middot; " + esc(r.filename) +
-             " (YYMMDD_배치명_c클론번호_프라이머명.ab1)"));
     SCAN.reads.filter(r => !r.has_trace).forEach(r =>
       w.push("트레이스 없음 &middot; " + esc(r.filename) + " (혼합 콜로니 판정 제한)"));
     const seen = {}, dupIds = [];
     SCAN.reads.forEach(r => { if (seen[r.id]) dupIds.push(r.id); seen[r.id] = 1; });
     Array.from(new Set(dupIds)).forEach(i =>
       w.push("클론 ID 중복 &middot; " + esc(i) +
-             " — 결과가 잘못 짝지어질 수 있으니 파일명을 구분해 주세요"));
+             " — 파일명이 곧 클론 ID 이므로 결과가 잘못 짝지어집니다. 이름을 구분해 주세요"));
     $("#scanWarn").innerHTML = w.length
       ? '<div class="err-box" style="background:#fffbeb;border-color:#fde68a;color:#78350f">' +
         w.map(x => "<div>" + x + "</div>").join("") + "</div>" : "";
   }catch(e){ showErr("입력을 읽는 중 오류가 발생했습니다.", String(e)); }
+  renderCards();
   refreshRunnable();
 }
 
 function refreshRunnable(){
-  $("#btnRun").disabled = !(py && ab1Files.size > 0);
+  $("#btnRun").disabled = !(py && totalFiles() > 0);
 }
 
 /* ---------- 실행 ---------- */
@@ -624,14 +903,22 @@ $("#btnRun").addEventListener("click", async () => {
   await new Promise(r => setTimeout(r, 20));
   try{
     py.globals.set("_cfg_json", JSON.stringify(readConfig()));
-    py.globals.set("_meta_json", JSON.stringify({
-      runtime: "브라우저 / Pyodide " + PYODIDE_VER,
-      timestamp: new Date().toISOString().slice(0,19).replace("T"," "),
-      primer_file: faFile ? faFile.name : ""
-    }));
-    OUT = JSON.parse(py.runPython("js_analyze(_cfg_json, _meta_json)"));
-    if (!OUT.ok){
-      setRun("err", "중단"); showErr("분석을 진행할 수 없습니다.", OUT.errors.join("\n"));
+    py.globals.set("_meta_json", JSON.stringify(readMeta()));
+    let out;
+    if (isBatchMode()){
+      py.globals.set("_batches_json", JSON.stringify(cards.map(c =>
+        ({dir: cardDir(c), vh: c.vh || DOC.nosel, chain: c.chain || DOC.nosel}))));
+      out = JSON.parse(py.runPython(
+        "js_analyze_batches(_batches_json, _cfg_json, _meta_json)"));
+      RUN = out.ok ? {batch: true, batches: out.batches, merged: out.merged} : null;
+    }else{
+      out = JSON.parse(py.runPython("js_analyze(_cfg_json, _meta_json)"));
+      RUN = out.ok ? {batch: false,
+                      batches: [{vh: null, chain: null, label: "", result: out}],
+                      merged: out} : null;
+    }
+    if (!out.ok){
+      setRun("err", "중단"); showErr("분석을 진행할 수 없습니다.", out.errors.join("\n"));
     }else{
       renderResults(); setRun("ok", "완료");
       $("#secRes").scrollIntoView({behavior:"smooth", block:"start"});
@@ -664,53 +951,100 @@ function badge(v){
 }
 const BADGECOL = new Set(["최종판정","구조QC","QC1","QC2","QC3","QC4","내부종결"]);
 
-function renderResults(){
-  const H = OUT.summary.headers, R = OUT.summary.rows;
+/* 예상(배치 지정) 과 판정을 한 칸에 보여준다. VH family 는 "VH6|VH2" 처럼
+   여러 개가 나올 수 있으므로 | 로 쪼개 그 안에 있으면 일치로 본다. */
+function expCell(exp, v){
+  const got = String(v == null ? "" : v);
+  if (!exp || exp === DOC.nosel) return got || "-";
+  const ok = got !== "" && got !== "-" && got.split("|").indexOf(exp) >= 0;
+  return '<span class="exp">' + esc(exp) + " &rarr; </span>" +
+         '<span class="' + (ok ? "" : "ng") + '">' + esc(got || "-") + "</span>";
+}
+
+function tableFor(H, R, exp){
   const idx = (COLMODE === "compact")
     ? COMPACT.map(n => H.indexOf(n)).filter(i => i >= 0)
     : H.map((_, i) => i);
-  let h = "<thead><tr>" + idx.map(i => "<th>" + esc(H[i]) + "</th>").join("") + "</tr></thead><tbody>";
+  let h = "<thead><tr>" + idx.map(i => "<th>" + esc(H[i]) + "</th>").join("") +
+          "</tr></thead><tbody>";
   R.forEach(row => {
     h += "<tr>" + idx.map(i => {
       const name = H[i], v = row[i];
       const cls = NUMCOL.has(name) ? ' class="num"' : (MONOCOL.has(name) ? ' class="mono"' : "");
-      const inner = BADGECOL.has(name) ? badge(v)
-        : (v == null || v === "" ? '<span style="color:var(--muted)">-</span>'
-                                  : esc(v));
+      let inner;
+      if (BADGECOL.has(name)) inner = badge(v);
+      else if (exp && name === "VH family") inner = expCell(exp.vh, v);
+      else if (exp && name === "경쇄") inner = expCell(exp.chain, v);
+      else inner = (v == null || v === "") ? '<span style="color:var(--muted)">-</span>' : esc(v);
       return "<td" + cls + ">" + inner + "</td>";
     }).join("") + "</tr>";
   });
-  $("#resTbl").innerHTML = h + "</tbody>";
+  return h + "</tbody>";
+}
 
-  const nPass = R.filter(r => String(r[H.indexOf("최종판정")]).startsWith("PASS")).length;
-  $("#resHint").innerHTML = "통과 <b>" + nPass + "</b> / " + R.length +
-    " &nbsp;·&nbsp; param_hash <code>" + esc(OUT.config.param_hash) + "</code>" +
-    " &nbsp;·&nbsp; design_hash <code>" + esc(OUT.config.design_hash) + "</code>" +
-    (OUT.config.nondefault.length
+function renderResults(){
+  const M = RUN.merged;
+  const H = M.summary.headers, R = M.summary.rows;
+  const iv = H.indexOf("최종판정");
+  const nPass = (rows) => rows.filter(r => String(r[iv]).startsWith("PASS")).length;
+
+  if (RUN.batch){
+    // 배치별 그룹. 그룹 안에서는 클론 ID 이름순.
+    $("#resTbl").innerHTML = "";
+    $("#resTbl").style.display = "none";
+    let h = "";
+    RUN.batches.forEach((b, i) => {
+      const rows = b.result.summary.rows.slice()
+        .sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+      h += '<div class="grp-h"><span>배치 ' + (i+1) + " · " +
+        esc(b.vh) + " &times; " + esc(b.chain) + "</span>" +
+        '<span class="m">' + rows.length + " 클론 · 통과 " + nPass(rows) +
+        " · design_hash " + esc(b.design_hash) + "</span></div>" +
+        '<div class="tblwrap"><table>' +
+        tableFor(H, rows, {vh: b.vh, chain: b.chain}) + "</table></div>";
+    });
+    $("#resGroups").innerHTML = h;
+  }else{
+    $("#resGroups").innerHTML = "";
+    $("#resTbl").style.display = "";
+    $("#resTbl").innerHTML = tableFor(H, R, null);
+  }
+
+  $("#resHint").innerHTML = "통과 <b>" + nPass(R) + "</b> / " + R.length +
+    " &nbsp;·&nbsp; param_hash <code>" + esc(M.config.param_hash) + "</code>" +
+    (RUN.batch
+      ? " &nbsp;·&nbsp; 배치 " + RUN.batches.length + " 개 (design_hash 배치별)"
+      : " &nbsp;·&nbsp; design_hash <code>" + esc(M.config.design_hash) + "</code>") +
+    (M.config.nondefault.length
       ? ' &nbsp;·&nbsp; <span style="color:var(--warn)">비표준 임계값 ' +
-        OUT.config.nondefault.length + " 건</span>" : "");
+        M.config.nondefault.length + " 건</span>" : "");
 
-  // 상세
-  const callById = {}; OUT.calls.forEach(c => callById[c.id] = c);
-  const det = OUT.qc.filter(q => q.notes.length ||
-    (((callById[q.id] || {}).notes) || []).length);
-  $("#resDetail").innerHTML = det.length ? det.map(q => {
-    const c = callById[q.id] || {flags:[], notes:[]};
-    const flags = q.flags.concat(c.flags);
-    return '<details class="detail"><summary><b>' + esc(q.id) + "</b>" +
-      flags.map(f => '<span class="chip">' + esc(f) + "</span>").join("") +
-      "</summary><div class=\"body\"><ul>" +
-      q.notes.concat(c.notes).map(n => "<li>" + esc(n) + "</li>").join("") +
-      "</ul></div></details>";
-  }).join("") : '<div class="status">추가로 확인할 항목이 없습니다.</div>';
+  // 상세 — 배치를 가로질러 모읍니다.
+  let det = "";
+  RUN.batches.forEach(b => {
+    const callById = {}; b.result.calls.forEach(c => callById[c.id] = c);
+    b.result.qc.filter(q => q.notes.length ||
+      (((callById[q.id] || {}).notes) || []).length).forEach(q => {
+      const c = callById[q.id] || {flags:[], notes:[]};
+      det += '<details class="detail"><summary><b>' + esc(q.id) + "</b>" +
+        q.flags.concat(c.flags).map(f => '<span class="chip">' + esc(f) + "</span>").join("") +
+        "</summary><div class=\"body\"><ul>" +
+        q.notes.concat(c.notes).map(n => "<li>" + esc(n) + "</li>").join("") +
+        "</ul></div></details>";
+    });
+  });
+  $("#resDetail").innerHTML = det ||
+    '<div class="status">추가로 확인할 항목이 없습니다.</div>';
 
   // 조성
-  const C = OUT.composition;
+  const C = M.composition;
   const line = (a) => a.length ? a.map(kv => esc(kv[0]) + " " + kv[1]).join(" / ") +
     "  (" + a.length + " 종)" : "&mdash;";
-  let comp = "<h3 style=\"font-size:13px;color:var(--snu);margin-bottom:10px\">배치 조성" +
+  let comp = "<h3 style=\"font-size:13px;color:var(--snu);margin-bottom:10px\">" +
+    (RUN.batch ? "전체 조성" : "배치 조성") +
     " <span style=\"font-weight:400;color:var(--muted)\">— 구조QC와 프라이머 판별을 모두 통과한 " +
-    C.n_good + " / " + C.n_total + " 클론</span></h3><dl class=\"kv\">";
+    C.n_good + " / " + C.n_total + " 클론" +
+    (RUN.batch ? " · 배치별 대조는 xlsx 04 시트 참조" : "") + "</span></h3><dl class=\"kv\">";
   if (C.batch_vh_match !== null) comp += "<dt>지정 VH family</dt><dd>" +
     C.batch_vh_match + " / " + C.n_good + " 일치</dd>";
   if (C.batch_chain_match !== null) comp += "<dt>지정 경쇄</dt><dd>" +
@@ -733,13 +1067,15 @@ function renderResults(){
 
 $$("#colMode button").forEach(b => b.addEventListener("click", () => {
   $$("#colMode button").forEach(x => x.classList.remove("on"));
-  b.classList.add("on"); COLMODE = b.dataset.m; if (OUT) renderResults();
+  b.classList.add("on"); COLMODE = b.dataset.m; if (RUN) renderResults();
 }));
 
 /* ---------- 내려받기 ---------- */
 function filePrefix(){
-  const d = (OUT.reads.find(r => r.date) || {}).date || "";
-  const b = (OUT.config.batches[0] || "batch");
+  // 파일명 접두어는 폼에서 받은 배치명·날짜로 만듭니다 (파일명 파싱 폐기).
+  const m = readMeta();
+  const d = m.batch_date || "";
+  const b = m.batch_label || "batch";
   return ((d ? d + "_" : "") + b).replace(/[^\p{L}\p{N}\-_]/gu, "_");
 }
 function download(name, bytes, mime){

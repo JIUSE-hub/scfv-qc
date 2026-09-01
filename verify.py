@@ -61,7 +61,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.8"
+VERIFY_VERSION = "1.9"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -677,7 +677,10 @@ def check_js_keys(report, js, core, keyset, doc_keys, doc_sub):
     scan_sub = dict((k, set(v)) for k, v in scan.items() if isinstance(v, dict))
 
     targets = [
+        # analyze 반환을 가리키는 별칭들. RUN.merged 는 M 으로, 배치별 결과는
+        # b.result 로 받으므로 두 경로 모두 analyze 의 키로 대조합니다.
         ("OUT", "core.analyze", set(out_keys), out_sub, out_src),
+        ("M", "core.analyze (RUN.merged)", set(out_keys), out_sub, out_src),
         ("SCAN", "core.scan_inputs", set(scan), scan_sub, "실행 결과"),
         ("DOC", "js_docs (GLUE)", set(doc_keys), doc_sub, "AST"),
         ("C", "core.compose", set(comp), {}, comp_src),
@@ -703,6 +706,13 @@ def check_js_keys(report, js, core, keyset, doc_keys, doc_sub):
                   "참조 %d 건 전부 존재 · 제공 키 %d (%s)" % (n, len(keys), origin),
                   "제공되지 않는 키: " + ", ".join(bad) + " (%s)" % origin)
 
+    # 배치별 결과 : b.result.<키> 형태로 analyze 반환을 참조합니다.
+    hits = re.findall(r"\.result\.([A-Za-z_$][A-Za-z0-9_$]*)", js)
+    bad = sorted(set(k for k in hits if k not in out_keys and k not in JS_PROPS))
+    report.ok("B", ".result.* 대 core.analyze", not bad,
+              "참조 %d 건 전부 존재 (%s)" % (len(hits), out_src),
+              "제공되지 않는 키: " + ", ".join(bad))
+
     # fillBatchOptions 의 guess 인자 (SCAN.guess 하위키)
     body = js_function_body(js, "fillBatchOptions")
     if body is not None and isinstance(scan.get("guess"), dict):
@@ -713,8 +723,16 @@ def check_js_keys(report, js, core, keyset, doc_keys, doc_sub):
                   "없는 키: " + ", ".join(gone))
 
 
-def check_readconfig_covers_design(report, js, core):
-    keys = list(core.DESIGN_KEYS)
+# 배치 모드에서만 GLUE 의 js_analyze_batches 가 카드 값으로 덮어쓰는 키.
+# 나머지는 readConfig 가 반드시 보내야 합니다 — 라이브러리 모드(js_analyze)는
+# readConfig 의 cfg 를 그대로 core.analyze 에 넘기므로, 거기서 빠진 키는 조용히
+# 기본값으로 돌아갑니다. 근거 구간을 GLUE 까지 넓히면 이 구멍을 못 잡습니다.
+GLUE_SUPPLIED_KEYS = ("batch_vh_family", "batch_chain")
+
+
+def check_readconfig_covers_design(report, js, core, glue=""):
+    """설계 키가 index.html 을 통해 core 까지 전달되는가."""
+    need = [k for k in core.DESIGN_KEYS if k not in GLUE_SUPPLIED_KEYS]
     parts, source = [], []
     for fname in ("buildDesignForm", "readConfig"):
         body = js_function_body(js, fname)
@@ -724,20 +742,26 @@ def check_readconfig_covers_design(report, js, core):
         source.append(fname)
     if not parts:
         parts, source = [js], ["script 전체 (함수 추출 실패)"]
-    region = "\n".join(parts)
-    literal = set(js_strings(region))
+    literal = set(js_strings("\n".join(parts)))
     dynamic = set()
     # cfg 를 채우는 것은 readConfig 이므로, 동적 생성 인정은 readConfig 가 직접
     # DOC.design 을 순회할 때만 합니다. buildDesignForm 이 조회 테이블을 만드느라
     # DOC.design 을 읽는 것만으로는 그 키가 cfg 에 실린다는 보장이 없습니다.
-    rc_body = js_function_body(js, "readConfig") or ""
-    if re.search(r"DOC\.design", rc_body):
+    if re.search(r"DOC\.design", js_function_body(js, "readConfig") or ""):
         dynamic = set(k for k, _lab, _memo in core.DESIGN_DOC)
-    covered = literal | dynamic
-    gone = [k for k in keys if k not in covered]
-    report.ok("B", "readConfig 가 DESIGN_KEYS 를 덮는가", not gone,
-              "%d/%d 키 · 근거 %s" % (len(keys) - len(gone), len(keys), "+".join(source)),
-              "index.html 이 보내지 않는 키: " + ", ".join(gone))
+    gone = [k for k in need if k not in (literal | dynamic)]
+
+    # 카드에서 오는 두 키는 GLUE 가 cfg 에 실제로 대입하는지 봅니다.
+    # 문자열이 있는지만 보면 cfg["batch_chain"] 을 읽기만 해도 통과해 버립니다.
+    miss = [k for k in GLUE_SUPPLIED_KEYS
+            if k in core.DESIGN_KEYS and not re.search(
+                r"cfg\[\s*[\"']" + re.escape(k) + r"[\"']\s*\]\s*=[^=]", glue or "")]
+
+    report.ok("B", "readConfig 가 DESIGN_KEYS 를 덮는가", not gone and not miss,
+              "readConfig %d 키 (근거 %s) + GLUE %d 키"
+              % (len(need), "+".join(source), len(GLUE_SUPPLIED_KEYS)),
+              "readConfig 가 안 보냄: %s / GLUE 가 안 넣음: %s"
+              % (", ".join(gone) or "-", ", ".join(miss) or "-"))
 
 
 # 이슈 2 에서 CONST / RULES 로 옮긴 옛 모듈 상수. 이름이 남아 있으면 이동이 덜 끝난 것.
@@ -819,6 +843,9 @@ def check_analysis_mode(report, core):
             bad.append("%r 를 넘겼는데 %r 로 저장됨" % (m, got))
     if "analysis_mode" not in core.JUDGMENT_DESIGN_KEYS:
         bad.append("JUDGMENT_DESIGN_KEYS 에 analysis_mode 없음")
+    # index.html 은 modeOpts 의 순서로 탭 이름을 붙이므로 순서가 계약입니다.
+    if list(core.MODE_OPTS) != [core.MODE_ASSIGNED, core.MODE_LIBRARY]:
+        bad.append("MODE_OPTS 순서가 [MODE_ASSIGNED, MODE_LIBRARY] 가 아님")
     report.ok("B", "analysis_mode 모드 값", not bad,
               "기본값 %s · MODE_OPTS %s · design_hash 대상"
               % (default, "/".join(core.MODE_OPTS)),
@@ -947,6 +974,15 @@ def check_no_label_leak(report, html, core):
     report.ok("C", "설정 라벨이 index.html 에 등장", not hits,
               "DESIGN_DOC %d + CFG_DOC %d 라벨 전부 미등장"
               % (len(core.DESIGN_DOC), len(core.THRESH_KEYS)),
+              "index.html 에 하드코딩됨: " + ", ".join(hits))
+
+
+def check_no_mode_leak(report, html, core):
+    """분석 모드 값은 core 에서 읽어야 합니다. index.html 에 리터럴로 있으면 실패."""
+    hits = [m for m in core.MODE_OPTS if m and m in html]
+    report.ok("C", "모드 값이 index.html 에 등장", not hits,
+              "MODE_OPTS %d 개 전부 미등장 (js_docs 의 modeOpts 로 전달)"
+              % len(core.MODE_OPTS),
               "index.html 에 하드코딩됨: " + ", ".join(hits))
 
 
@@ -1377,7 +1413,7 @@ def main():
         guard(report, "B", "JS 참조 키 대조", check_js_keys,
               report, js, core, keyset, doc_keys, doc_sub)
         guard(report, "B", "readConfig 가 DESIGN_KEYS 를 덮는가",
-              check_readconfig_covers_design, report, js, core)
+              check_readconfig_covers_design, report, js, core, glue or "")
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
         guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
@@ -1396,6 +1432,8 @@ def main():
               check_no_const_leak, report, html, core)
         guard(report, "C", "설정 라벨이 index.html 에 등장",
               check_no_label_leak, report, html, core)
+        guard(report, "C", "모드 값이 index.html 에 등장",
+              check_no_mode_leak, report, html, core)
 
         guard(report, "D", "회귀", check_regression,
               report, reg_out, reg_note, reg_status)
