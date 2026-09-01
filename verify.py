@@ -15,6 +15,7 @@ verify.py — pAIM1 scFv QC 웹도구 자체 검사
              index.html 의 badge() 가 그 표시값을 모두 처리하는지 대조
   [F] GLUE    index.html 의 GLUE 를 꺼내 실행해 배치별 호출과 병합을 검증
   [G] 대조군  testdata/negctrl/ 실측 .ab1 로 대조군 판정과 인서트 지문을 고정
+  [H] 라이브러리 testdata/lib260901/ 49 클론으로 통계·구조 조합·오염 분자를 고정
 
 RULES 커버리지
 ------------------------------------------------------------------------------
@@ -52,6 +53,7 @@ node 와 openpyxl 은 있으면 쓰고 없으면 해당 검사를 "건너뜀" �
 
 import ast
 import builtins
+import hashlib
 import io
 import os
 import re
@@ -64,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.5"
+VERIFY_VERSION = "2.6"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -2056,6 +2058,231 @@ def check_negctrl_regression(report, core):
 
 
 # =============================================================================
+#  [H] 260901 라이브러리 49 클론 실측 회귀
+# =============================================================================
+# 이 데이터는 세 공백을 함께 메웁니다 — 이슈 12 의 AMBIG_FAMILY? / WRONG_FAMILY
+# 실측, EMPTY_VECTOR 조건의 항 단위 커버리지("NotI 있고 AscI 없음" 클론),
+# 실패 유형 다양성. 개별 클론 49 개를 다 박지 않고 통계량으로 고정해
+# 개별 변동은 흡수하되 전체 경향이 바뀌면 잡히게 합니다.
+LIB_DIR = os.path.join(TESTDATA, "lib260901")
+H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
+           "H4 오염 분자 추적"]
+
+LIB_EXPECT = {
+    "n": 49,
+    "final": {"PASS": 1, "FAIL": 48},
+    # 구조QC 분포와 플래그 빈도는 실측해 채웁니다. 비어 있으면 H1 이 측정값을
+    # 상세 칸에 찍고 실패합니다 ([G2] 의 md5 와 같은 방식).
+    "qc_verdict": {
+        "NO_LINKER": 11, "LINKER_DEL": 8, "NO_ASCI": 8, "TOO_SHORT": 6,
+        "QC_DEL": 5, "FRAMESHIFT": 4, "LOW_COVERAGE": 3, "ABERRANT_D1": 1,
+        "MIXED": 1, "PASS": 1, "WARN": 1,
+    },
+    "flags": {
+        "FRAMESHIFT": 24, "NO_FRAG1": 20, "NO_VL": 20, "NO_LINKER": 19,
+        "TOO_SHORT": 19, "INTERNAL_STOP": 18, "LOW_COVERAGE": 17,
+        "LONG_INSERT?": 9, "ABERRANT_D1": 8, "LINKER_DEL": 8, "NO_ASCI": 8,
+        "QC_DEL": 6, "QC_WARN": 5, "MIXED": 4, "NO_NOTI": 3, "ABERRANT_D2": 2,
+    },
+    "structure": {"NotI+AscI": 32, "NotI만": 14, "AscI만": 0, "둘 다 없음": 3},
+    # 같은 49 클론을 대조군 규칙으로도 읽습니다. 위 위치 분포만 고정하면
+    # negctrl_verdict 의 EMPTY_VECTOR 조건("NotI 또는 AscI 미검출")에서 어느 항이
+    # 필요한지는 덮이지 않습니다. 실제 판정 분포까지 고정해야 항 단위가 걸립니다.
+    "neg_verdict": {"CARRYOVER": 14, "EMPTY_VECTOR": 13, "CONTAMINATED?": 7,
+                    "PARTIAL_INSERT": 6, "CONTAMINATED": 5, "MIXED": 4},
+    # VH6-VK_1 은 동점 후보가 VH4|VH6 이고 배치 지정 VH6 가 그 안에 있습니다.
+    # WRONG_FAMILY / AMBIG_FAMILY? 는 배치 지정 family 가 판정 집합에 없을 때만
+    # 나오는 분기라 이 클론에는 붙지 않습니다. 남는 근거는 ambiguity 필드입니다.
+    "ambig": {"clone": "VH6-VK_1", "batch": ("VH6", "kappa"),
+              "pair": ("For-1-4b", "For-1-6"), "tie": "split",
+              "families": "VH4|VH6", "no_family_flag": True},
+    "wrong": {"clone": "VH5-VK_1", "batch": ("VH5", "kappa")},
+    "carry": {"md5": "bdb1431f6378b361f1cc0f93cb172f38",
+              "clones": ["VH1-VK_3", "VH2-VK_9", "VH4-VK_3"]},
+}
+
+
+def lib_inputs():
+    d = os.path.join(ROOT, LIB_DIR)
+    if not os.path.isdir(d):
+        return None
+    names = sorted(n for n in os.listdir(d) if n.lower().endswith(".ab1"))
+    if not names:
+        return None
+    out = []
+    for n in names:
+        with open(os.path.join(d, n), "rb") as fh:
+            out.append((n, fh.read()))
+    return out
+
+
+def _resolve_clone(ids, tag):
+    """클론 태그로 실제 클론 ID(=확장자 뗀 파일명)를 찾는다. 못 찾으면 None."""
+    if tag in ids:
+        return tag
+    hits = [i for i in ids
+            if i.startswith(tag + "-") or i.startswith(tag + "_")
+            or i.startswith(tag + ".")]
+    return hits[0] if len(hits) == 1 else None
+
+
+def check_lib_regression(report, core):
+    files = lib_inputs()
+    if files is None:
+        for n in H_NAMES:
+            report.add("H", n, SKIP, "testdata/lib260901/ 에 .ab1 이 없습니다")
+        return
+    fa = os.path.join(ROOT, TESTDATA, "scFv_primers.fa")
+    if not os.path.isfile(fa):
+        for n in H_NAMES:
+            report.add("H", n, SKIP, "testdata/scFv_primers.fa 가 없습니다")
+        return
+    with io.open(fa, encoding="utf-8", errors="ignore") as fh:
+        ptext = fh.read()
+    meta = {"runtime": "verify.py " + VERIFY_VERSION, "timestamp": "0",
+            "primer_file": "scFv_primers.fa", "batch_label": "260901",
+            "batch_date": "260901"}
+    out = core.analyze(files, ptext, {"analysis_mode": core.MODE_LIBRARY}, meta)
+    if not out.get("ok"):
+        for n in H_NAMES:
+            report.add("H", n, FAIL, "analyze 실패: " + "; ".join(out.get("errors", [])))
+        return
+    _check_h1(report, out)
+    _check_h3(report, core, out, files, meta)
+    _check_h4(report, out, core)
+    _check_h2(report, core, files, ptext, meta)
+
+
+def _check_h1(report, out):
+    H = out["summary"]["headers"]
+    iv, iq = H.index("최종판정"), H.index("구조QC")
+    rows = out["summary"]["rows"]
+    final, qcv, flags = {}, {}, {}
+    for r in rows:
+        final[r[iv]] = final.get(r[iv], 0) + 1
+        qcv[r[iq]] = qcv.get(r[iq], 0) + 1
+    for q in out["qc"]:
+        for f in q["flags"]:
+            flags[f] = flags.get(f, 0) + 1
+    for c in out["calls"]:
+        for f in c["flags"]:
+            flags[f] = flags.get(f, 0) + 1
+    bad = []
+    if len(rows) != LIB_EXPECT["n"]:
+        bad.append("클론 %d (기대 %d)" % (len(rows), LIB_EXPECT["n"]))
+    if final != LIB_EXPECT["final"]:
+        bad.append("최종판정 %s (기대 %s)" % (final, LIB_EXPECT["final"]))
+    for key, got in (("qc_verdict", qcv), ("flags", flags)):
+        want = LIB_EXPECT[key]
+        if not want:
+            bad.append("%s 상수 미기입 · 실측 %s"
+                       % (key, sorted(got.items(), key=lambda kv: (-kv[1], kv[0]))))
+        elif got != want:
+            only_got = sorted(k for k in got if got.get(k) != want.get(k))
+            bad.append("%s 불일치 %s" % (key, [(k, got.get(k), want.get(k))
+                                              for k in only_got]))
+    report.ok("H", H_NAMES[0], not bad,
+              "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종"
+              % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags)),
+              " / ".join(bad))
+
+
+def _check_h3(report, core, out, files, meta):
+    got = {"NotI+AscI": 0, "NotI만": 0, "AscI만": 0, "둘 다 없음": 0}
+    for q in out["qc"]:
+        n, a = q["pos_notI"] >= 0, q["pos_ascI"] >= 0
+        got["NotI+AscI" if (n and a) else
+            "NotI만" if n else "AscI만" if a else "둘 다 없음"] += 1
+    bad = []
+    if got != LIB_EXPECT["structure"]:
+        bad.append("위치 분포 %s (기대 %s)" % (got, LIB_EXPECT["structure"]))
+    neg = core.analyze(files, "", {"analysis_mode": core.MODE_NEGCTRL}, meta)
+    if not neg.get("ok") or not neg.get("negctrl"):
+        bad.append("대조군 규칙 실행 실패")
+    else:
+        nv = dict((v, c) for v, c in neg["negctrl"]["counts"] if c)
+        if nv != LIB_EXPECT["neg_verdict"]:
+            bad.append("대조군 판정 분포 %s (기대 %s)" % (nv, LIB_EXPECT["neg_verdict"]))
+    report.ok("H", H_NAMES[2], not bad,
+              "위치 %s · 대조군 규칙 EMPTY_VECTOR %d 건 포함"
+              % (LIB_EXPECT["structure"], LIB_EXPECT["neg_verdict"]["EMPTY_VECTOR"]),
+              " / ".join(bad))
+
+
+def _check_h4(report, out, core):
+    # pub_qc 에는 seq 가 없으므로 07_서열 시트의 인서트 염기서열로 지문을 냅니다.
+    md5 = LIB_EXPECT["carry"]["md5"]
+    hits = []
+    s7 = [s for s in out["sheets"] if s["title"].startswith("07")]
+    if not s7:
+        report.add("H", H_NAMES[3], FAIL, "07_서열 시트를 찾지 못했습니다")
+        return
+    h = s7[0]["headers"]
+    ic, iseq = h.index("clone"), h.index("인서트 염기서열 (NotI~AscI)")
+    for row in s7[0]["rows"]:
+        seq = row[iseq] or ""
+        if seq and hashlib.md5(seq.encode("ascii")).hexdigest() == md5:
+            hits.append(row[ic])
+    ids = [r[ic] for r in s7[0]["rows"]]
+    want = [_resolve_clone(ids, t) for t in LIB_EXPECT["carry"]["clones"]]
+    bad = []
+    if None in want:
+        bad.append("클론 태그를 찾지 못함: %s"
+                   % [t for t, w in zip(LIB_EXPECT["carry"]["clones"], want) if w is None])
+    elif sorted(hits) != sorted(want):
+        bad.append("실측 %s (기대 %s)" % (sorted(hits), sorted(want)))
+    report.ok("H", H_NAMES[3], not bad,
+              "md5 %s… 가 %d 클론 (%s) · vec_2 · c01 과 동일"
+              % (md5[:12], len(LIB_EXPECT["carry"]["clones"]),
+                 ", ".join(LIB_EXPECT["carry"]["clones"])),
+              " / ".join(bad))
+
+
+def _check_h2(report, core, files, ptext, meta):
+    ids = [core.read_id_from_name(n)["id"] for n, _d in files]
+    bad = []
+    for key in ("ambig", "wrong"):
+        spec = LIB_EXPECT[key]
+        cid = _resolve_clone(ids, spec["clone"])
+        if cid is None:
+            bad.append("%s 클론을 찾지 못함" % spec["clone"])
+            continue
+        one = [(n, d) for n, d in files if core.read_id_from_name(n)["id"] == cid]
+        vh, ch = spec["batch"]
+        out = core.analyze(one, ptext,
+                           {"analysis_mode": core.MODE_ASSIGNED,
+                            "batch_vh_family": vh, "batch_chain": ch}, meta)
+        if not out.get("ok"):
+            bad.append("%s analyze 실패" % spec["clone"])
+            continue
+        call = out["calls"][0]
+        if key == "ambig":
+            bogus = [f for f in ("WRONG_FAMILY", "AMBIG_FAMILY?") if f in call["flags"]]
+            if bogus:
+                bad.append("%s 에 %s 가 붙음 (배치 지정 VH6 가 동점 후보 안이라 "
+                           "family 플래그는 안 나와야 함)" % (spec["clone"], bogus))
+            got = call["vh"]["ambiguity"] if call["vh"] else []
+            pair = set(spec["pair"])
+            hit = [x for x in got if set((x["a"], x["b"])) == pair]
+            if not hit:
+                bad.append("%s ambiguity %s (%s 기대)"
+                           % (spec["clone"], got, "/".join(spec["pair"])))
+            elif hit[0]["tie"] != spec["tie"] or hit[0]["families"] != spec["families"]:
+                bad.append("%s 등급 %s/%s (기대 %s/%s)"
+                           % (spec["clone"], hit[0]["tie"], hit[0]["families"],
+                              spec["tie"], spec["families"]))
+        else:
+            if "WRONG_FAMILY" not in call["flags"] or "AMBIG_FAMILY?" in call["flags"]:
+                bad.append("%s flags %s (WRONG_FAMILY 만 기대)"
+                           % (spec["clone"], call["flags"]))
+    report.ok("H", H_NAMES[1], not bad,
+              "%s → ambiguity %s(%s) · family 플래그 없음 · %s → WRONG_FAMILY"
+              % (LIB_EXPECT["ambig"]["clone"], "/".join(LIB_EXPECT["ambig"]["pair"]),
+                 LIB_EXPECT["ambig"]["tie"], LIB_EXPECT["wrong"]["clone"]),
+              " / ".join(bad))
+
+
+# =============================================================================
 #  실행
 # =============================================================================
 def main():
@@ -2147,11 +2374,14 @@ def main():
     if core is not None:
         guard(report, "F", "GLUE 경로", check_glue, report, glue, core)
         guard(report, "G", "대조군 실측 회귀", check_negctrl_regression, report, core)
+        guard(report, "H", "라이브러리 실측 회귀", check_lib_regression, report, core)
     else:
         for n in F_NAMES:
             report.add("F", n, FAIL, "core.py 를 불러올 수 없어 GLUE 를 돌리지 못했습니다")
         for n in G_NAMES:
             report.add("G", n, FAIL, "core.py 를 불러올 수 없습니다")
+        for n in H_NAMES:
+            report.add("H", n, FAIL, "core.py 를 불러올 수 없습니다")
 
     ver = "core %s / notebook %s" % (core.CORE_VERSION, core.NB_VERSION) \
         if core is not None else "core.py 불러오기 실패"
@@ -2160,7 +2390,7 @@ def main():
     print_table(report)
     print("")
     parts = []
-    for s in ("A", "B", "C", "D", "E", "F", "G"):
+    for s in ("A", "B", "C", "D", "E", "F", "G", "H"):
         parts.append("[%s] 통과 %d 실패 %d 건너뜀 %d"
                      % (s, report.count(s, PASS), report.count(s, FAIL),
                         report.count(s, SKIP)))
