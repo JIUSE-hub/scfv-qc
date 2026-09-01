@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.7"
+VERIFY_VERSION = "2.8"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1699,6 +1699,88 @@ def check_landmark_quality_units(report, core):
               " / ".join(bad))
 
 
+def _fake_call(cid, **groups):
+    """compose_called / primer_coverage 단위시험용 call dict."""
+    c = {"id": cid, "chain": groups.pop("chain", None), "cdr3_len": groups.pop("cdr3", None),
+         "vh": None, "jh": None, "vl": None, "vj": None}
+    for k, v in groups.items():
+        c[k] = v
+    return c
+
+
+def _fake_group(names, families, ok=True, chain="heavy"):
+    return {"names": list(names), "families": list(families), "chain": chain,
+            "ok": ok, "mm": 0, "delta": None, "mmpos": [], "core_len": 10,
+            "start": 0, "ambiguity": [], "runner_up_pairs": []}
+
+
+def check_compose_called_units(report, core):
+    cfg = core.build_config(None, [])
+    calls = [
+        # vh 만 성공 (구조가 깨져도 판별은 되는 클론)
+        _fake_call("c1", vh=_fake_group(["pA"], ["VH1"])),
+        # vh + vl 성공, vl 은 kappa
+        _fake_call("c2", vh=_fake_group(["pA"], ["VH1"]),
+                   vl=_fake_group(["kA"], ["IGKV1"], chain="kappa"), chain="kappa"),
+        # vh 는 실패(ok=False) 라 모수에서 빠져야 함
+        _fake_call("c3", vh=_fake_group(["pB"], ["VH2"], ok=False),
+                   vl=_fake_group(["kB"], ["IGKV2"], chain="kappa"), chain="kappa"),
+        # 동점 : 후보 두 개
+        _fake_call("c4", vh=_fake_group(["pA", "pB"], ["VH1", "VH2"])),
+    ]
+    got = core.compose_called(calls, cfg)
+    bad = []
+    if got["groups"]["vh"]["n"] != 3:
+        bad.append("vh 모수 %d (기대 3 · 실패 클론 제외)" % got["groups"]["vh"]["n"])
+    if got["groups"]["vl"]["n"] != 2:
+        bad.append("vl 모수 %d (기대 2 · 그룹마다 다름)" % got["groups"]["vl"]["n"])
+    if got["groups"]["jh"]["n"] != 0:
+        bad.append("jh 모수 %d (기대 0)" % got["groups"]["jh"]["n"])
+    if dict(got["groups"]["vh"]["tally"]) != {"VH1": 2, "VH1|VH2": 1}:
+        bad.append("vh 집계 %s" % got["groups"]["vh"]["tally"])
+    if got["chain"]["n"] != 2:
+        bad.append("경쇄 모수 %d (기대 2)" % got["chain"]["n"])
+    report.ok("E", "compose_called 단위", not bad,
+              "그룹별 모수 vh 3 · vl 2 · jh 0 · 실패 클론 제외 · 동점은 결합 라벨",
+              " / ".join(bad))
+
+
+def check_primer_coverage_units(report, core):
+    cfg = core.build_config(None, [])
+    alpha = core.RULES["COVERAGE_ALPHA"]
+
+    def prim(name, fam):
+        return {"name": name, "seq": "A" * 10, "core": "A" * 10, "core_trim": 0,
+                "len": 10, "group": "F1_For", "chain": "heavy", "family": fam,
+                "families": [fam], "target": "", "fragment": "", "dir": "", "tm": ""}
+
+    primers = [prim("pA", "VH1"), prim("pB", "VH2"), prim("pC", "VH3")]
+    # 동점 후보 pA/pB 가 함께 나온 판정 하나. pC 만 미관측이어야 합니다.
+    calls = [_fake_call("c1", vh=_fake_group(["pA", "pB"], ["VH1", "VH2"]))]
+    cov = core.primer_coverage(calls, primers, cfg)
+    bad = []
+    if len(cov) != 1:
+        bad.append("버킷 %d 개" % len(cov))
+    else:
+        c = cov[0]
+        names = [u["name"] for u in c["unobserved"]]
+        if names != ["pC"]:
+            bad.append("미관측 %s (기대 ['pC'] · 동점 후보는 전부 관측)" % names)
+        if c["observed"] != 2 or c["total"] != 3 or c["n"] != 1:
+            bad.append("관측 %d/%d n=%d" % (c["observed"], c["total"], c["n"]))
+
+    # 표본 부족 경계 : S=3 에서 (1-1/3)^n 이 0.05 를 지나는 지점은 n=8 (0.039)
+    for n, want in ((7, True), (8, False)):
+        many = [_fake_call("c%d" % i, vh=_fake_group(["pA"], ["VH1"])) for i in range(n)]
+        c = core.primer_coverage(many, primers, cfg)[0]
+        if c["underpowered"] != want:
+            bad.append("n=%d p=%.3f underpowered=%s (기대 %s, 기준 %.2f)"
+                       % (n, c["p_miss"], c["underpowered"], want, alpha))
+    report.ok("E", "primer_coverage 단위", not bad,
+              "동점 후보 전부 관측 · 표본 부족 경계 (1-1/S)^n 대 %.2f" % alpha,
+              " / ".join(bad))
+
+
 def check_badge_states(report, js):
     body = js_function_body(js, "badge")
     if body is None:
@@ -2111,7 +2193,7 @@ def check_negctrl_regression(report, core):
 # 개별 변동은 흡수하되 전체 경향이 바뀌면 잡히게 합니다.
 LIB_DIR = os.path.join(TESTDATA, "lib260901")
 H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
-           "H4 오염 분자 추적", "H5 랜드마크 이상 품질"]
+           "H4 오염 분자 추적", "H5 랜드마크 이상 품질", "H6 판별 성공·커버리지"]
 
 LIB_EXPECT = {
     "n": 49,
@@ -2150,6 +2232,16 @@ LIB_EXPECT = {
     # QC2 는 실측 17 건입니다(제시값 18). minq 중앙값 29 · 범위 5~51 은 일치하므로
     # 개수만 어긋난 것으로 보고 실측값으로 고정합니다.
     "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
+    # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
+    "called_n": {"vh": 29, "jh": 28, "vl": 29, "vj": 17},
+    "coverage": {
+        ("F1_For", "heavy"): (9, 6, 3, False),
+        ("F2_Rev", "heavy"): (4, 4, 0, False),
+        ("F3_For", "kappa"): (20, 12, 8, True),
+        ("F3_For", "lambda"): (25, 0, 25, True),
+        ("F3_Rev", "kappa"): (4, 3, 1, False),
+        ("F3_Rev", "lambda"): (9, 0, 9, True),
+    },
 }
 
 
@@ -2200,6 +2292,7 @@ def check_lib_regression(report, core):
         return
     _check_h1(report, out)
     _check_h5(report, core, out)
+    _check_h6(report, core, out)
     _check_h3(report, core, out, files, meta)
     _check_h4(report, out, core)
     _check_h2(report, core, files, ptext, meta)
@@ -2236,6 +2329,29 @@ def _check_h1(report, out):
     report.ok("H", H_NAMES[0], not bad,
               "%d 클론 · 최종판정 %s · 구조QC %d 종 · 플래그 %d 종"
               % (LIB_EXPECT["n"], LIB_EXPECT["final"], len(qcv), len(flags)),
+              " / ".join(bad))
+
+
+def _check_h6(report, core, out):
+    """판별 성공 모수와 프라이머 커버리지. 집계·표시 계층이라 판정과 무관합니다."""
+    called = out.get("called") or {}
+    cov = out.get("coverage") or []
+    bad = []
+    got_n = dict((k, called["groups"][k]["n"]) for k in LIB_EXPECT["called_n"])         if called else {}
+    if got_n != LIB_EXPECT["called_n"]:
+        bad.append("판별 성공 %s (기대 %s)" % (got_n, LIB_EXPECT["called_n"]))
+    want = LIB_EXPECT["coverage"]
+    got = dict(((c["group"], c["chain"]),
+                (c["total"], c["observed"], len(c["unobserved"]), c["underpowered"]))
+               for c in cov)
+    if got != want:
+        diff = [(k, got.get(k), want.get(k)) for k in sorted(set(got) | set(want))
+                if got.get(k) != want.get(k)]
+        bad.append("커버리지 %s" % diff)
+    report.ok("H", H_NAMES[5], not bad,
+              "판별 성공 %s · 커버리지 %d 버킷 (표본 부족 %d)"
+              % (LIB_EXPECT["called_n"], len(want),
+                 sum(1 for v in want.values() if v[3])),
               " / ".join(bad))
 
 
@@ -2449,6 +2565,9 @@ def main():
         guard(report, "E", "primer_ambiguity 단위", check_ambiguity_units, report, core)
         guard(report, "E", "family 모호성 근거", check_family_ambiguity_units, report, core)
         guard(report, "E", "landmark_quality 단위", check_landmark_quality_units,
+              report, core)
+        guard(report, "E", "compose_called 단위", check_compose_called_units, report, core)
+        guard(report, "E", "primer_coverage 단위", check_primer_coverage_units,
               report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)

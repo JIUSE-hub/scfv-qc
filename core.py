@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.6"
+CORE_VERSION = "2.7"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -95,6 +95,7 @@ RULES = {
     "EXO_TRIM": 3,
     "OVERLONG_ZONE": 5,
     "LM_LOWQ_MARK": 20,
+    "COVERAGE_ALPHA": 0.05,
     "FLAG_SEV": {
         "CONCATEMER": 3, "PARENTAL": 3, "NO_NOTI": 3, "NO_ASCI": 3, "NO_LINKER": 3,
         "TOO_SHORT": 3, "TOO_LONG": 3, "FRAMESHIFT": 3, "INTERNAL_STOP": 3,
@@ -117,6 +118,9 @@ RULES_DOC = [
     ("OVERLONG_ZONE", "F1_For 불일치 편중을 점검하는 판별구간 앞쪽 범위 (nt)"),
     ("LM_LOWQ_MARK", "랜드마크 이상을 저품질로 표시하는 최저 Q 기준. "
                      "표시 전용이며 판정에는 쓰이지 않는다"),
+    ("COVERAGE_ALPHA", "미관측 프라이머를 dropout 이라 말할 수 없다고 보는 확률 기준. "
+                       "균등 사용 가정에서 (1-1/S)^n 이 이 값 이상이면 표본 부족. "
+                       "표시 전용이며 판정에는 쓰이지 않는다"),
     ("FLAG_SEV", "플래그별 심각도. 여러 플래그가 동시에 붙을 때 어느 것을 verdict 로 삼을지 결정"),
 ]
 
@@ -1407,6 +1411,91 @@ def _ambiguity_doc(primers, cfg):
                " · ".join(combos) if combos else "없음"))
 
 
+# 판별 성공분 집계에 쓰는 그룹 대응. call_one 이 채점하는 네 그룹입니다.
+CALLED_GROUPS = (("vh", "F1_For", "VH family"),
+                 ("jh", "F2_Rev", "JH"),
+                 ("vl", "F3_For", "VL V-gene"),
+                 ("vj", "F3_Rev", "VL J-gene"))
+
+
+def _tally(labels):
+    c = {}
+    for lab in labels:
+        c[lab] = c.get(lab, 0) + 1
+    # 노트북 Counter.most_common() 과 동일 : 건수 내림차순, 동점은 삽입 순
+    return sorted(c.items(), key=lambda kv: -kv[1])
+
+
+def compose_called(calls, cfg):
+    """프라이머 판별에 성공한 클론만 그룹별로 집계한다.
+
+    compose 는 '구조QC 와 판별을 모두 통과한' 클론만 세므로, 구조가 깨졌어도
+    판별 구간은 멀쩡한 클론의 정보를 버립니다. 두 질문이 다릅니다.
+      compose         : 쓸 수 있는 클론이 얼마나 다양한가
+      compose_called  : 프라이머 pool 이 고르게 작동했나
+    한 클론이 F1_For 는 성공하고 F3_For 는 실패할 수 있어 그룹마다 모수가
+    다릅니다. 그래서 그룹별 n 을 반드시 함께 돌려줍니다.
+    """
+    groups = {}
+    for key, group, label in CALLED_GROUPS:
+        ok = [p[key] for p in calls if p[key] is not None and p[key]["ok"]]
+        groups[key] = {"group": group, "label": label, "n": len(ok),
+                       "tally": _tally(["|".join(c["families"]) or "?" for c in ok])}
+    ch = [p["chain"] for p in calls if p["chain"]]
+    lens = [p["cdr3_len"] for p in calls if p["cdr3_len"] is not None]
+    return {"n_total": len(calls), "groups": groups,
+            "chain": {"label": "경쇄", "n": len(ch), "tally": _tally(ch)},
+            "cdr3": {"n": len(lens), "lens": sorted(lens),
+                     "min": min(lens) if lens else None,
+                     "median": _fmt_med(median(lens)),
+                     "max": max(lens) if lens else None}}
+
+
+def primer_coverage(calls, primers, cfg):
+    """그룹·사슬별로 한 번이라도 판정에 나온 프라이머와 미관측 프라이머.
+
+    동점으로 여러 후보가 나온 경우 그 후보를 전부 관측으로 셉니다. 어느
+    프라이머였는지 모르므로 어느 쪽도 dropout 이라 말할 수 없기 때문입니다.
+    첫 번째만 세면 실제로 관측된 프라이머가 dropout 으로 잘못 보고됩니다.
+
+    표본 부족 판정은 균등 사용을 가정한 하한 기준입니다. 종 수 S 인 pool 에서
+    n 개를 뽑아 특정 한 종이 한 번도 안 나올 확률 (1 - 1/S)^n 이
+    RULES["COVERAGE_ALPHA"] 이상이면 미관측을 dropout 이라 말할 수 없습니다.
+    실제 germline 사용 빈도는 균등하지 않으므로 실제 확률은 이보다 큽니다.
+    """
+    seen, n_by = {}, {}
+    for key, group, _lab in CALLED_GROUPS:
+        for p in calls:
+            c = p[key]
+            if c is None or not c["ok"]:
+                continue
+            b = (group, c["chain"])
+            n_by[b] = n_by.get(b, 0) + 1
+            seen.setdefault(b, set()).update(c["names"])
+    buckets = {}
+    for p in primers:
+        if p["group"] in SCORED_GROUPS:
+            buckets.setdefault((p["group"], p["chain"]), []).append(p)
+    out = []
+    for (group, chain), plist in sorted(buckets.items()):
+        names = seen.get((group, chain), set())
+        n, S = n_by.get((group, chain), 0), len(plist)
+        miss = [p for p in plist if p["name"] not in names]
+        p_miss = ((1.0 - 1.0 / S) ** n) if S else 1.0
+        out.append({"group": group, "chain": chain, "total": S, "n": n,
+                    "observed": S - len(miss),
+                    "unobserved": [{"name": p["name"], "families": list(p["families"])}
+                                   for p in miss],
+                    "p_miss": p_miss,
+                    "underpowered": p_miss >= RULES["COVERAGE_ALPHA"]})
+    return out
+
+
+def _pct(v, n):
+    """모수를 반드시 붙인 비율 표기. 모수 없는 비율은 오해를 부릅니다."""
+    return "%d (%.1f%%, n=%d)" % (v, 100.0 * v / n, n) if n else "%d (n=0)" % v
+
+
 def glossary(primers=None, cfg=None):
     L = CONST["QC2"]
     sev3 = ", ".join(sev_flags(3))
@@ -1775,7 +1864,7 @@ def build_summary(qc_results, calls, cfg, meta=None):
     return rows
 
 
-def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
+def build_sheets(qc_results, calls, cfg, comp, meta, primers=None, coverage=None):
     """xlsx 시트 데이터를 순서대로 담은 리스트를 반환한다."""
     if cfg.get("analysis_mode") == MODE_NEGCTRL:
         return build_negctrl_sheets(qc_results, cfg, meta, primers)
@@ -1824,7 +1913,14 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
     r4 = [["개요", "배치", ", ".join(cfg["batches"]) or "-", ""],
           ["개요", "분석 클론 수", comp["n_total"], ""],
           ["개요", "구조QC + 프라이머판별 모두 통과", comp["n_good"],
-           "아래 분포는 이 클론들만 집계"]]
+           "'분포(통과)' 는 이 클론들만 집계"]]
+    called = compose_called(calls, cfg)
+    for key, group, label in CALLED_GROUPS:
+        g = called["groups"][key]
+        r4.append(["개요", "%s 판별 성공 (%s)" % (label, group),
+                   _pct(g["n"], called["n_total"]),
+                   "구조 결함과 무관하게 이 그룹의 판별에 성공한 클론 수. "
+                   "'분포(판별)' 의 모수"])
     if comp["batch_vh_match"] is not None:
         r4.append(["대조", "지정 VH family 일치",
                    "%d / %d" % (comp["batch_vh_match"], comp["n_good"]),
@@ -1841,14 +1937,60 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None):
         items = comp[key]
         if items:
             for k, v in items:
-                r4.append(["분포", lab, "%s : %d" % (k, v), memo])
-            r4.append(["분포", lab + " (종 수)", len(items), ""])
+                r4.append(["분포(통과)", lab, "%s : %s" % (k, _pct(v, comp["n_good"])), memo])
+            r4.append(["분포(통과)", lab + " (종 수)", len(items),
+                       "모수 n=%d" % comp["n_good"]])
         else:
-            r4.append(["분포", lab, "-", memo])
+            r4.append(["분포(통과)", lab, "-", memo + " (n=%d)" % comp["n_good"]])
+    # 분포(판별) : 구조 결함과 무관하게 판별에 성공한 클론만. 그룹마다 모수가 다릅니다.
+    for key, group, label in CALLED_GROUPS:
+        g = called["groups"][key]
+        if g["tally"]:
+            for k, v in g["tally"]:
+                r4.append(["분포(판별)", label, "%s : %s" % (k, _pct(v, g["n"])), group])
+            r4.append(["분포(판별)", label + " (종 수)", len(g["tally"]),
+                       "모수 n=%d" % g["n"]])
+        else:
+            r4.append(["분포(판별)", label, "-", "%s · 판별 성공 0 건" % group])
+    cg = called["chain"]
+    for k, v in cg["tally"]:
+        r4.append(["분포(판별)", cg["label"], "%s : %s" % (k, _pct(v, cg["n"])),
+                   "kappa/lambda 동점이 아닌 클론만"])
+    if not cg["tally"]:
+        r4.append(["분포(판별)", cg["label"], "-", "경쇄가 확정된 클론 없음"])
+
+    # 커버리지 : 미관측 프라이머가 dropout 신호인지, 표본이 부족한 것인지
+    alpha = RULES["COVERAGE_ALPHA"]
+    for cv in coverage or []:
+        tag = "%s / %s" % (cv["group"], cv["chain"])
+        r4.append(["커버리지", tag,
+                   "%d / %d 관측 (n=%d)" % (cv["observed"], cv["total"], cv["n"]),
+                   "미관측 %d 종%s" % (len(cv["unobserved"]),
+                                     " · 표본 부족" if cv["underpowered"] else "")])
+        if cv["unobserved"]:
+            r4.append(["커버리지", tag + " 미관측",
+                       ", ".join("%s(%s)" % (u["name"], "|".join(u["families"]) or "?")
+                                 for u in cv["unobserved"]),
+                       "균등 사용 가정에서 특정 1 종이 안 나올 확률 "
+                       "(1-1/%d)^%d = %.3f %s %.2f. 실제 germline 사용 빈도는 "
+                       "균등하지 않으므로 이 값은 하한이며, 실제로는 미관측이 더 "
+                       "흔합니다." % (cv["total"], cv["n"], cv["p_miss"],
+                                    ">=" if cv["underpowered"] else "<", alpha)])
+
     if comp["cdr3_lens"]:
         r4.append(["CDR3-H3", "길이 목록 (aa)",
                    ", ".join(str(x) for x in comp["cdr3_lens"]), ""])
         r4.append(["CDR3-H3", "중앙값 (aa)", comp["cdr3_median"], ""])
+        r4.append(["CDR3-H3", "길이 분포 (통과)",
+                   "최소 %d · 중앙 %s · 최대 %d"
+                   % (min(comp["cdr3_lens"]), comp["cdr3_median"],
+                      max(comp["cdr3_lens"])),
+                   "모수 n=%d" % len(comp["cdr3_lens"])])
+    cd = called["cdr3"]
+    if cd["n"]:
+        r4.append(["CDR3-H3", "길이 분포 (판별)",
+                   "최소 %d · 중앙 %s · 최대 %d" % (cd["min"], cd["median"], cd["max"]),
+                   "CDR3-H3 가 추출된 클론 전체. 모수 n=%d" % cd["n"]])
     r4.append(["CDR3-H3", "중복 서열 수", len(comp["cdr3_dup"]),
                ", ".join(comp["cdr3_dup"]) if comp["cdr3_dup"]
                else "동일 CDR3-H3 를 가진 클론 없음"])
@@ -2275,7 +2417,8 @@ def analyze(files, primer_text="", overrides=None, meta=None):
     meta.setdefault("primer_file", meta.get("primer_file", ""))
     meta["primer_n"] = len(primers)
     meta["files"] = [r["filename"] for r in reads]
-    sheets = build_sheets(qc_results, calls, cfg, comp, meta, primers)
+    coverage = primer_coverage(calls, primers, cfg) if primers else []
+    sheets = build_sheets(qc_results, calls, cfg, comp, meta, primers, coverage)
     summary_rows = sheets[0]["rows"]
 
     pub_qc = []
@@ -2310,6 +2453,8 @@ def analyze(files, primer_text="", overrides=None, meta=None):
         "qc": pub_qc,
         "calls": pub_calls,
         "composition": comp,
+        "called": compose_called(calls, cfg),
+        "coverage": coverage,
         # 대조군 모드에서만 채웁니다. 키는 항상 있어야 화면 쪽 계약이 흔들리지 않습니다.
         "negctrl": (negctrl_summary(qc_results, cfg)
                     if cfg["analysis_mode"] == MODE_NEGCTRL else None),

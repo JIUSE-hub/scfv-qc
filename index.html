@@ -1102,33 +1102,85 @@ function renderResults(){
   $("#resDetail").innerHTML = det ||
     '<div class="status">추가로 확인할 항목이 없습니다.</div>';
 
-  // 조성
-  const C = M.composition;
-  const line = (a) => a.length ? a.map(kv => esc(kv[0]) + " " + kv[1]).join(" / ") +
-    "  (" + a.length + " 종)" : "&mdash;";
-  let comp = "<h3 style=\"font-size:13px;color:var(--snu);margin-bottom:10px\">" +
-    (RUN.batch ? "전체 조성" : "배치 조성") +
-    " <span style=\"font-weight:400;color:var(--muted)\">— 구조QC와 프라이머 판별을 모두 통과한 " +
-    C.n_good + " / " + C.n_total + " 클론" +
-    (RUN.batch ? " · 배치별 대조는 xlsx 04 시트 참조" : "") + "</span></h3><dl class=\"kv\">";
-  if (C.batch_vh_match !== null) comp += "<dt>지정 VH family</dt><dd>" +
-    C.batch_vh_match + " / " + C.n_good + " 일치</dd>";
-  if (C.batch_chain_match !== null) comp += "<dt>지정 경쇄</dt><dd>" +
-    C.batch_chain_match + " / " + C.n_good + " 일치</dd>";
-  comp += "<dt>VH family</dt><dd>" + line(C.vh) + "</dd>" +
-    "<dt>JH</dt><dd>" + line(C.jh) + "</dd>" +
-    "<dt>경쇄</dt><dd>" + line(C.chain) + "</dd>" +
-    "<dt>VL V-gene</dt><dd>" + line(C.vl) + "</dd>" +
-    "<dt>VL J-gene</dt><dd>" + line(C.vj) + "</dd>" +
-    "<dt>CDR3-H3 길이</dt><dd>" + (C.cdr3_lens.length
-      ? C.cdr3_lens.join(", ") + " aa  (중앙값 " + C.cdr3_median + ")" : "&mdash;") + "</dd>" +
-    "<dt>중복 CDR3-H3</dt><dd>" + C.cdr3_dup.length + " 건" +
-      (C.cdr3_dup.length ? " &middot; " + esc(C.cdr3_dup.join(", ")) : "") + "</dd>";
-  if (C.overlong_suspect.length) comp += '<dt style="color:var(--warn)">점검</dt><dd>' +
+  renderComposition();
+  $("#secRes").classList.remove("hidden");
+}
+
+/* 조성은 모수가 둘입니다. 기본은 판별 기준 — 통과가 적을 때 화면이 비어
+   보이지 않게 하려는 것입니다. 항목 라벨은 전부 core 에서 옵니다. */
+const COMP_MODES = ["판별 기준", "통과 기준"];
+let compMode = 0;
+
+function renderComposition(){
+  const M = RUN.merged, C = M.composition, K = M.called, CV = M.coverage || [];
+  const pass = compMode === 1;
+  const head = COMP_MODES.map((nm, i) =>
+    '<button type="button" data-cm="' + i + '"' + (i === compMode ? ' class="on"' : "") +
+    ">" + esc(nm) + "</button>").join("");
+  let h = '<div class="grp-h"><span>배치 조성</span><span class="seg">' + head +
+    '</span><span class="m">' + (pass
+      ? "구조QC와 프라이머 판별을 모두 통과한 " + C.n_good + " / " + C.n_total + " 클론"
+      : "그룹마다 판별에 성공한 클론만. 모수가 그룹별로 다릅니다") + "</span></div>";
+
+  const line = (a, n) => a.length
+    ? a.map(kv => esc(kv[0]) + " " + kv[1] +
+        (n ? " (" + (100 * kv[1] / n).toFixed(1) + "%)" : "")).join(" / ") +
+      "  (" + a.length + " 종, n=" + (n == null ? C.n_good : n) + ")"
+    : "&mdash;";
+  h += '<dl class="kv">';
+  if (pass){
+    if (C.batch_vh_match !== null) h += "<dt>지정 VH family</dt><dd>" +
+      C.batch_vh_match + " / " + C.n_good + " 일치</dd>";
+    if (C.batch_chain_match !== null) h += "<dt>지정 경쇄</dt><dd>" +
+      C.batch_chain_match + " / " + C.n_good + " 일치</dd>";
+    h += "<dt>VH family</dt><dd>" + line(C.vh, C.n_good) + "</dd>" +
+      "<dt>JH</dt><dd>" + line(C.jh, C.n_good) + "</dd>" +
+      "<dt>경쇄</dt><dd>" + line(C.chain, C.n_good) + "</dd>" +
+      "<dt>VL V-gene</dt><dd>" + line(C.vl, C.n_good) + "</dd>" +
+      "<dt>VL J-gene</dt><dd>" + line(C.vj, C.n_good) + "</dd>" +
+      "<dt>CDR3-H3 길이</dt><dd>" + (C.cdr3_lens.length
+        ? C.cdr3_lens.join(", ") + " aa  (중앙값 " + C.cdr3_median +
+          ", n=" + C.cdr3_lens.length + ")" : "&mdash;") + "</dd>";
+  }else{
+    Object.keys(K.groups).forEach(k => {
+      const g = K.groups[k];
+      h += "<dt>" + esc(g.label) + "</dt><dd>" + line(g.tally, g.n) +
+        ' <span style="color:var(--muted)">· ' + esc(g.group) + "</span></dd>";
+    });
+    h += "<dt>" + esc(K.chain.label) + "</dt><dd>" + line(K.chain.tally, K.chain.n) + "</dd>";
+    h += "<dt>CDR3-H3 길이</dt><dd>" + (K.cdr3.n
+      ? "최소 " + K.cdr3.min + " · 중앙 " + K.cdr3.median + " · 최대 " + K.cdr3.max +
+        " aa  (n=" + K.cdr3.n + ")" : "&mdash;") + "</dd>";
+  }
+  h += "<dt>중복 CDR3-H3</dt><dd>" + C.cdr3_dup.length + " 건" +
+    (C.cdr3_dup.length ? " &middot; " + esc(C.cdr3_dup.join(", ")) : "") + "</dd>";
+  if (C.overlong_suspect.length) h += '<dt style="color:var(--warn)">점검</dt><dd>' +
     "F1_For 불일치가 판별구간 앞 " + C.overlong_zone + " nt 안에만 몰린 클론 &middot; " +
     esc(C.overlong_suspect.join(", ")) + "</dd>";
-  $("#resComp").innerHTML = comp + "</dl>";
-  $("#secRes").classList.remove("hidden");
+  h += "</dl>";
+
+  if (CV.length){
+    h += '<div class="grp-h"><span>프라이머 커버리지</span>' +
+      '<span class="m">미관측이 dropout 인지 표본 부족인지는 아래 판정을 보세요</span>' +
+      "</div><dl class=\"kv\">";
+    CV.forEach(c => {
+      h += "<dt>" + esc(c.group + " / " + c.chain) + "</dt><dd>" +
+        c.observed + " / " + c.total + " 관측 (n=" + c.n + ")" +
+        (c.underpowered
+          ? ' <span style="color:var(--warn)">· 표본 부족 (p=' + c.p_miss.toFixed(3) + ')</span>'
+          : "") +
+        (c.unobserved.length
+          ? '<div style="margin-top:3px;color:var(--muted);font-size:12px">미관측 ' +
+            esc(c.unobserved.map(u => u.name + "(" + (u.families.join("|") || "?") + ")")
+              .join(", ")) + "</div>"
+          : "") + "</dd>";
+    });
+    h += "</dl>";
+  }
+  $("#resComp").innerHTML = h;
+  $$("#resComp [data-cm]").forEach(b => b.addEventListener("click", () => {
+    compMode = parseInt(b.dataset.cm, 10); renderComposition();
+  }));
 }
 
 $$("#colMode button").forEach(b => b.addEventListener("click", () => {
