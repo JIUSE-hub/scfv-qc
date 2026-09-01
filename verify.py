@@ -66,7 +66,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.0"
+VERIFY_VERSION = "3.2"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -902,20 +902,20 @@ def check_ambiguity_runtime(report, core):
 
 
 def check_ambig_family_flag(report, core, html):
-    """AMBIG_FAMILY? 가 FLAG_SEV · 06_용어설명 · badge 세 곳에 모두 있는가."""
-    flag = "AMBIG_FAMILY?"
+    """모호성 플래그가 FLAG_SEV · 06_용어설명 · badge 세 곳에 모두 있는가."""
     bad = []
-    if flag not in core.RULES["FLAG_SEV"]:
-        bad.append("FLAG_SEV 에 없음")
-    if not any(t == flag for _c, t, _d in core.glossary()):
-        bad.append("06_용어설명에 항목 없음")
     body = js_function_body(html, "badge")
-    cls, how = badge_class(body, flag) if body else (None, "badge() 없음")
-    if cls != "b-check":
-        bad.append("badge 에서 %s(%s)" % (cls, how))
-    report.ok("B", "AMBIG_FAMILY? 처리", not bad,
-              "FLAG_SEV 심각도 %s · 용어설명 있음 · badge b-check"
-              % core.RULES["FLAG_SEV"].get(flag), " / ".join(bad))
+    for flag in ("AMBIG_FAMILY?", "AMBIG_CALL?"):
+        if flag not in core.RULES["FLAG_SEV"]:
+            bad.append("%s FLAG_SEV 에 없음" % flag)
+        if not any(t == flag for _c, t, _d in core.glossary()):
+            bad.append("%s 06_용어설명에 항목 없음" % flag)
+        cls, how = badge_class(body, flag) if body else (None, "badge() 없음")
+        if cls != "b-check":
+            bad.append("%s badge 에서 %s(%s)" % (flag, cls, how))
+    report.ok("B", "모호성 플래그 처리", not bad,
+              "AMBIG_FAMILY? · AMBIG_CALL? 모두 심각도 2 · 용어설명 · badge b-check",
+              " / ".join(bad))
 
 
 def check_negctrl_vocab(report, core, html):
@@ -1471,7 +1471,7 @@ def check_negctrl_units(report, core):
 # --- index.html 의 badge() 가 아래 표시값을 모두 처리하는가 --------------------
 BADGE_EXPECT = [("OK", "b-pass"), ("S1G0", "b-warn"), ("GAP2", "b-fail"),
                 ("ABSENT", "b-fail"), ("NA", "b-none"), ("PARENTAL?", "b-check"),
-                ("AMBIG_FAMILY?", "b-check")]
+                ("AMBIG_FAMILY?", "b-check"), ("AMBIG_CALL?", "b-check")]
 
 _BADGE_RULE_RE = re.compile(
     r"^\s*if\s*\((?P<cond>.+?)\)\s*return\s*'<span class=\"badge (?P<cls>b-[a-z]+)\"")
@@ -1838,6 +1838,99 @@ def check_primer_coverage_units(report, core):
     report.ok("E", "primer_coverage 단위", not bad,
               "동점 후보 전부 관측 · 표본 부족 경계 (1-1/S)^n 대 %.2f" % alpha,
               " / ".join(bad))
+
+
+def check_linker_recovery_units(report, core):
+    """이슈 15 : 완전 일치가 놓친 링커를 랜드마크 위치로 보정하는가."""
+    cfg = core.build_config(None, [])
+    C = core.CONST
+    fill = UNIT_FILL * 400
+    swap = {"A": "C", "C": "A", "G": "T", "T": "G"}
+
+    def read_with(link_seq, d1_gap=351, d2_gap=300):
+        seq = (C["PELB_ATG"] + "GGG" + C["QC1"] + fill[:d1_gap] + link_seq +
+               fill[:d2_gap] + C["QC3"] + C["QC4"] + "A" * 20)
+        return {"id": "syn", "clone": "syn", "batch": "", "date": "", "primer": "",
+                "filename": "syn.ab1", "raw_len": len(seq), "raw_seq": seq,
+                "raw_qual": [], "trace": {}, "ploc": []}
+
+    bad = []
+    # 완전 일치 : 보정 없이도 위치가 잡힌다
+    base = core.qc_one(read_with(C["QC2"]), cfg)
+    if base["pos_link"] < 0 or base["d1"] is None:
+        bad.append("완전 일치인데 pos_link %d" % base["pos_link"])
+
+    # 치환 1 개 : s.find 는 실패하지만 QC2 상태가 OK 이므로 보정된다
+    sub1 = list(C["QC2"]); sub1[20] = swap[sub1[20]]
+    r = core.qc_one(read_with("".join(sub1)), cfg)
+    if r["qc"]["QC2"]["status"] != "OK":
+        bad.append("치환 1 개인데 QC2 상태 %s" % r["qc"]["QC2"]["status"])
+    if r["pos_link"] != base["pos_link"] or r["d1"] != base["d1"]:
+        bad.append("보정 실패 : pos_link %d (기대 %d) · d1 %s (기대 %s)"
+                   % (r["pos_link"], base["pos_link"], r["d1"], base["d1"]))
+    if "NO_LINKER" in r["flags"]:
+        bad.append("보정했는데 NO_LINKER 가 남음 %s" % r["flags"])
+
+    # 갭 2 개 : 랜드마크가 깨졌으므로 위치를 쓰면 안 된다
+    gap = C["QC2"][:20] + C["QC2"][22:]
+    g = core.qc_one(read_with(gap), cfg)
+    if g["qc"]["QC2"]["status"] == "OK":
+        bad.append("갭 2 개인데 QC2 상태 OK")
+    elif g["pos_link"] >= 0:
+        bad.append("깨진 랜드마크(%s)인데 위치를 씀 %d"
+                   % (g["qc"]["QC2"]["status"], g["pos_link"]))
+
+    report.ok("E", "링커 위치 보정 단위", not bad,
+              "치환 1 개면 보정 · 갭이면 보정 안 함 · d1 이 완전 일치와 동일",
+              " / ".join(bad))
+
+
+def check_ambig_call_units(report, core):
+    """이슈 14 : 후보 여럿 + family 여러 종이면 배치 지정과 무관하게 AMBIG_CALL?."""
+    cfg = core.build_config({"analysis_mode": core.MODE_ASSIGNED,
+                             "batch_vh_family": "VHa"}, [])
+    C = core.CONST
+    base = "ACGTACGTACGTACGTACGTAC"
+    alt = "C" + base[1:]
+    mid = "G" + base[1:]
+
+    def prim(name, core_seq, fam):
+        return {"name": name, "seq": C["NotI"] + core_seq, "core": core_seq,
+                "core_trim": len(C["NotI"]), "len": len(C["NotI"]) + len(core_seq),
+                "group": "F1_For", "chain": "heavy", "family": fam, "families": [fam],
+                "target": "", "fragment": "", "dir": "", "tm": ""}
+
+    def run(plist, read_core):
+        seq = (C["PELB_ATG"] + "GGG" + C["QC1"][:C["QC1"].find(C["NotI"])] +
+               C["NotI"] + read_core + UNIT_FILL * 6 + C["QC3"] + C["QC4"] + "A" * 20)
+        read = {"id": "syn", "clone": "syn", "batch": "", "date": "", "primer": "",
+                "filename": "syn.ab1", "raw_len": len(seq), "raw_seq": seq,
+                "raw_qual": [], "trace": {}, "ploc": []}
+        amb = core.ambiguity_context(plist, cfg)
+        return core.call_one(core.qc_one(read, cfg), plist, cfg, amb)
+
+    bad = []
+    # 배치 지정 VHa 가 동점 집합 안에 있어도 붙어야 한다 (사각지대 그 자체)
+    c = run([prim("pA", base, "VHa"), prim("pB", alt, "VHb")], mid)
+    if "AMBIG_CALL?" not in c["flags"]:
+        bad.append("배치 지정이 집합 안인데 %s" % c["flags"])
+    if "WRONG_FAMILY" in c["flags"] or "AMBIG_FAMILY?" in c["flags"]:
+        bad.append("배치 지정이 집합 안인데 family 플래그가 붙음 %s" % c["flags"])
+
+    # 같은 family 끼리의 동점은 family 가 확정되므로 붙지 않는다
+    c = run([prim("pA", base, "VHa"), prim("pB", alt, "VHa")], mid)
+    if "AMBIG_CALL?" in c["flags"]:
+        bad.append("같은 family 동점인데 붙음 %s" % c["flags"])
+
+    # 프라이머 하나가 여러 germline 을 표적하는 경우(후보 1)는 해당 없음
+    p = prim("pM", base, "VHa"); p["families"] = ["VHa", "VHb"]
+    c = run([p], base)
+    if "AMBIG_CALL?" in c["flags"]:
+        bad.append("후보 1 개인데 붙음 %s" % c["flags"])
+
+    report.ok("E", "AMBIG_CALL? 단위", not bad,
+              "배치 지정이 집합 안이어도 붙음 · 같은 family 동점은 안 붙음 · "
+              "후보 1 개(다중 표적)는 안 붙음", " / ".join(bad))
 
 
 def check_badge_states(report, js):
@@ -2259,15 +2352,17 @@ LIB_EXPECT = {
     "final": {"PASS": 1, "FAIL": 48},
     # 구조QC 분포와 플래그 빈도는 실측해 채웁니다. 비어 있으면 H1 이 측정값을
     # 상세 칸에 찍고 실패합니다 ([G2] 의 md5 와 같은 방식).
+    # core 3.0 : 링커 위치 보정(이슈 15)으로 NO_LINKER 2 건이 NO_ASCI 로 옮겨가고
+    # NO_VL 2 건이 사라졌으며, AMBIG_CALL?(이슈 14) 6 건이 새로 붙습니다.
     "qc_verdict": {
-        "NO_LINKER": 11, "LINKER_DEL": 8, "NO_ASCI": 8, "TOO_SHORT": 6,
+        "NO_ASCI": 10, "NO_LINKER": 9, "LINKER_DEL": 8, "TOO_SHORT": 6,
         "QC_DEL": 5, "FRAMESHIFT": 4, "LOW_COVERAGE": 3, "ABERRANT_D1": 1,
         "MIXED": 1, "PASS": 1, "WARN": 1,
     },
     "flags": {
-        "FRAMESHIFT": 24, "NO_FRAG1": 20, "NO_VL": 20, "NO_LINKER": 19,
-        "TOO_SHORT": 19, "INTERNAL_STOP": 18, "LOW_COVERAGE": 17,
-        "LONG_INSERT?": 9, "ABERRANT_D1": 8, "LINKER_DEL": 8, "NO_ASCI": 8,
+        "FRAMESHIFT": 24, "NO_FRAG1": 20, "TOO_SHORT": 19, "INTERNAL_STOP": 18,
+        "NO_VL": 18, "LOW_COVERAGE": 17, "NO_LINKER": 17, "NO_ASCI": 10,
+        "ABERRANT_D1": 8, "LINKER_DEL": 8, "LONG_INSERT?": 7, "AMBIG_CALL?": 6,
         "QC_DEL": 6, "QC_WARN": 5, "MIXED": 4, "NO_NOTI": 3, "ABERRANT_D2": 2,
     },
     "structure": {"NotI+AscI": 32, "NotI만": 14, "AscI만": 0, "둘 다 없음": 3},
@@ -2292,12 +2387,12 @@ LIB_EXPECT = {
     # 개수만 어긋난 것으로 보고 실측값으로 고정합니다.
     "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
     # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
-    "called_n": {"vh": 29, "jh": 28, "vl": 29, "vj": 17},
+    "called_n": {"vh": 29, "jh": 30, "vl": 31, "vj": 17},
     "vh_species": (5, 5, [("VH4|VH6", 4)]),   # 확정 · 가능 · 동점 항목
     "coverage": {
         ("F1_For", "heavy"): (9, 6, 3, False),
         ("F2_Rev", "heavy"): (4, 4, 0, False),
-        ("F3_For", "kappa"): (20, 12, 8, True),
+        ("F3_For", "kappa"): (20, 13, 7, True),
         ("F3_For", "lambda"): (25, 0, 25, True),
         ("F3_Rev", "kappa"): (4, 3, 1, False),
         ("F3_Rev", "lambda"): (9, 0, 9, True),
@@ -2603,7 +2698,7 @@ def main():
         guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
         guard(report, "B", "모호성 항목이 런타임 계산인가",
               check_ambiguity_runtime, report, core)
-        guard(report, "B", "AMBIG_FAMILY? 처리", check_ambig_family_flag,
+        guard(report, "B", "모호성 플래그 처리", check_ambig_family_flag,
               report, core, html)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
@@ -2631,6 +2726,9 @@ def main():
         guard(report, "E", "대조군 판정 분기 단위", check_negctrl_units, report, core)
         guard(report, "E", "primer_ambiguity 단위", check_ambiguity_units, report, core)
         guard(report, "E", "family 모호성 근거", check_family_ambiguity_units, report, core)
+        guard(report, "E", "링커 위치 보정 단위", check_linker_recovery_units,
+              report, core)
+        guard(report, "E", "AMBIG_CALL? 단위", check_ambig_call_units, report, core)
         guard(report, "E", "landmark_quality 단위", check_landmark_quality_units,
               report, core)
         guard(report, "E", "compose_called 단위", check_compose_called_units, report, core)

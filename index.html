@@ -949,7 +949,7 @@ function badge(v){
   if (/^S\d+G\d+$/.test(s)) return '<span class="badge b-warn">' + esc(s) + "</span>";
   if (s === "OK") return '<span class="badge b-pass">OK</span>';
   if (s === "NA" || s === "-" || s === "") return '<span class="badge b-none">' + (s||"-") + "</span>";
-  if (s === "LONG_INSERT?" || s === "LOW_COVERAGE" || s === "PARENTAL?" || s === "AMBIG_FAMILY?") return '<span class="badge b-check">' + esc(s) + "</span>";
+  if (s === "LONG_INSERT?" || s === "LOW_COVERAGE" || s === "PARENTAL?" || s === "AMBIG_FAMILY?" || s === "AMBIG_CALL?") return '<span class="badge b-check">' + esc(s) + "</span>";
   return '<span class="badge b-fail">' + esc(s) + "</span>";
 }
 /* 대조군 verdict 는 어휘가 달라 별도 배지를 씁니다. 등급은 core 의

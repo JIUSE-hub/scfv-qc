@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.8"
+CORE_VERSION = "3.0"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -102,7 +102,7 @@ RULES = {
         "LINKER_DEL": 3, "QC_DEL": 3, "QC_ABSENT": 3,
         "ABERRANT_D1": 3, "ABERRANT_D2": 3, "TANDEM_REPEAT": 3, "MIXED": 3,
         "LONG_INSERT?": 2, "LOW_COVERAGE": 2, "PARENTAL?": 2,
-        "AMBIG_FAMILY?": 2,
+        "AMBIG_FAMILY?": 2, "AMBIG_CALL?": 2,
         "QC_WARN": 1,
     },
 }
@@ -811,6 +811,20 @@ def qc_one(read, cfg):
         qc[k] = check_landmark(CONST[k], s, q, cov[k], cfg)
     r["qc"] = qc
 
+    # 링커 위치 보정 : 완전 일치 탐색(s.find)이 놓쳤어도 랜드마크 검사가 허용
+    # 치환 안에서 찾았다면 그 위치를 씁니다. 상태가 OK 일 때만 씁니다 —
+    # GAP / ABSENT / S#G# 는 랜드마크가 깨진 것이라 위치를 신뢰할 수 없습니다.
+    #
+    # NotI 와 AscI 에는 같은 보정을 할 수 없습니다. QC1 은 pos_notI 가, QC3·QC4 는
+    # pos_ascI 가 있어야 covered 로 검사되므로(위 cov), 그 자리가 비면 랜드마크도
+    # NA 가 되어 되살릴 근거가 없습니다. 즉 이 어긋남은 QC2 에서만 생깁니다.
+    if pos_l < 0 and qc["QC2"]["status"] == "OK" and qc["QC2"]["pos"] >= 0:
+        pos_l = qc["QC2"]["pos"]
+        r["pos_link"] = pos_l
+        notes.append("링커를 완전 일치로는 못 찾았으나 랜드마크 검사가 치환 %d 개로 "
+                     "위치 %d 에서 찾음 - 그 위치로 d1/d2 를 계산합니다"
+                     % (qc["QC2"]["sub"], pos_l + 1))
+
     for k in ("QC1", "QC2", "QC3", "QC4"):
         lv = qc[k]["level"]
         qtail = (", 최저 Q %d" % qc[k]["minq"]) if qc[k]["minq"] is not None else ""
@@ -1284,6 +1298,22 @@ def call_one(r, primers, cfg, amb=None):
                 notes.append("배치 지정 %s 인데 %s 로 판정 - 튜브 간 교차오염 의심. "
                              "두 family 를 잇는 모호성 쌍은 없음"
                              % (cfg["batch_vh_family"], "|".join(fam_matched)))
+    # 판정 후보가 여럿이고 family 도 여러 종이면 family 가 확정되지 않은 것입니다.
+    # 배치 지정 여부와 무관하게 붙으므로, 배치 지정이 판정 집합 안에 있어
+    # WRONG_FAMILY / AMBIG_FAMILY? 분기에 닿지 않던 경우까지 덮습니다 (이슈 14).
+    amb_calls = []
+    for _k, _g, _lab in CALLED_GROUPS:
+        c = out[_k]
+        if c is not None and c["ok"] and len(c["names"]) > 1 and len(c["families"]) > 1:
+            amb_calls.append("%s %s (후보 %d : %s)"
+                             % (_lab, "|".join(c["families"]), len(c["names"]),
+                                ", ".join(c["names"])))
+    if amb_calls:
+        flags.append("AMBIG_CALL?")
+        notes.append("family 가 확정되지 않은 판정 - " + " · ".join(amb_calls) +
+                     ". 어느 프라이머였는지 모르므로 family 를 하나로 좁힐 수 없습니다. "
+                     "03_프라이머판별의 모호성 열을 보세요")
+
     if assigned and cfg["batch_chain"] != NOSEL and chain:
         if chain != cfg["batch_chain"]:
             flags.append("WRONG_CHAIN")
@@ -1640,6 +1670,14 @@ def glossary(primers=None, cfg=None):
          "For-1-4b 와 For-1-6 이 같은 미스매치로 걸린 것입니다. "
          "03_프라이머판별의 '후보수' 열로 구분합니다. 1 이면 (a), 2 이상이면 (b) 입니다. "
          "(b) 라면 같은 시트의 '모호성' 열에 어느 쌍이 어느 등급으로 관여했는지 나옵니다."],
+        ["프라이머 판별", "AMBIG_CALL?",
+         "판정 후보 프라이머가 2 개 이상이고 그 후보들이 서로 다른 family 를 가리키는 "
+         "경우다. 결과의 family 칸에 VH4|VH6 처럼 여러 값이 적히며, 어느 쪽인지 이 판별만 "
+         "으로는 좁힐 수 없다. 배치 지정 여부와 무관하게 붙는다 — 배치 지정 family 가 "
+         "후보 집합 안에 있으면 WRONG_FAMILY 도 AMBIG_FAMILY? 도 붙지 않아 family 가 "
+         "확정되지 않았다는 사실이 드러나지 않던 사각지대를 메운다. 프라이머 하나가 여러 "
+         "germline 을 표적해 | 가 붙는 경우(예: JH1|JH2)는 후보가 1 개이므로 해당하지 "
+         "않는다. 어느 쌍이 겹쳤는지는 03_프라이머판별의 모호성 열에 있다."],
         ["프라이머 판별", "AMBIG_FAMILY?",
          "배치 지정 VH family 와 판정 family 가 다르지만, 두 family 가 알려진 모호성 "
          "쌍으로 이어져 있어 교차오염으로 단정할 수 없는 경우입니다. 모호성 쌍이 없으면 "
