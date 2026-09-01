@@ -12,7 +12,8 @@ verify.py — pAIM1 scFv QC 웹도구 자체 검사
   [C] 누출   index.html 에 서열이 하드코딩되어 있지 않은가
   [D] 회귀   testdata/ 로 core.analyze 를 돌려 알려진 값이 재현되는가
   [E] 단위   합성 서열로 core.check_landmark 의 5 개 상태를 직접 확인하고,
-             index.html 의 badge() 가 그 5 종을 모두 처리하는지 대조
+             index.html 의 badge() 가 그 표시값을 모두 처리하는지 대조
+  [F] GLUE    index.html 의 GLUE 를 꺼내 실행해 배치별 호출과 병합을 검증
 
 RULES 커버리지
 ------------------------------------------------------------------------------
@@ -54,6 +55,7 @@ import io
 import os
 import re
 import shutil
+import json
 import string
 import subprocess
 import sys
@@ -61,7 +63,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.9"
+VERIFY_VERSION = "2.0"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1363,6 +1365,266 @@ def check_badge_states(report, js):
 
 
 # =============================================================================
+#  [F] GLUE 경로 — 배치별 core.analyze 호출과 병합
+# =============================================================================
+# [D] 는 js_analyze(단일 호출) 만 덮습니다. 배치 경로는 index.html 의 GLUE 에
+# 있어 core 만 불러서는 닿지 않으므로, GLUE 템플릿 리터럴을 꺼내 그대로 실행하고
+# testdata 를 두 배치로 나눠 돌립니다. 기대값은 실측해 고정했습니다.
+F_NAMES = ["F1 배치 2 개 병합", "F2 배치 label 구분", "F3 배치 지정 불일치",
+           "F4 param_hash 불일치 오류", "F5 library 경로", "F6 병합 시트 구조"]
+
+GLUE_EXPECT = {
+    "param_hash": "3473927a",
+    "design_hash": "8b1eab32",          # VH6 x kappa
+    "lib_design_hash": "68210578",      # library + 배치 지정 없음
+    "merged_rows": 4,
+    "n_good": 2,
+    "cdr3_median": 10,
+    "fasta_n": 2,
+    "ids": [_STEM % "01", _STEM % "02", _STEM % "03", _STEM % "04"],
+    "titles": ["01_판정요약", "02_구조QC상세", "03_프라이머판별", "04_배치조성",
+               "05_실행설정", "06_용어설명", "07_서열"],
+    "sheet01_rows": 4,
+    "block04": 3,                       # 배치 블록 2 + 전체 블록 1
+}
+
+
+class _ShimCore(object):
+    """F4 전용. 두 번째 analyze 의 param_hash 만 바꿔 배치 간 불일치를 만듭니다.
+
+    공개 API 로는 배치마다 다른 임계값을 줄 수 없어(cfg 가 하나) 이 방법으로만
+    js_analyze_batches 의 param_hash 일치 확인 분기에 닿을 수 있습니다.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._n = 0
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def analyze(self, *a, **kw):
+        out = self._real.analyze(*a, **kw)
+        self._n += 1
+        if self._n == 2 and out.get("ok"):
+            out = dict(out)
+            out["config"] = dict(out["config"])
+            out["config"]["param_hash"] = "0badf00d"
+        return out
+
+
+def _glue_env(glue, root):
+    """GLUE 를 실행하고, 파일 입출력만 임시 디렉터리로 돌려놓은 네임스페이스."""
+    ns = {}
+    keep = list(sys.path)
+    try:
+        exec(compile(glue, "GLUE(index.html)", "exec"), ns)
+    finally:
+        sys.path[:] = keep            # GLUE 의 sys.path.insert("/app") 되돌리기
+    src = os.path.join(ROOT, TESTDATA)
+    names = sorted(n for n in os.listdir(src) if n.lower().endswith(".ab1"))
+    fa = sorted(n for n in os.listdir(src) if n.lower().endswith((".fa", ".fasta", ".fas")))
+    dirs = {}
+    for key, part in (("b1", names[:2]), ("b2", names[2:4]), ("all", names[:4])):
+        d = os.path.join(root, key)
+        os.makedirs(d)
+        for n in part:
+            shutil.copyfile(os.path.join(src, n), os.path.join(d, n))
+        dirs[key] = d
+    with io.open(os.path.join(src, fa[0]), encoding="utf-8", errors="ignore") as fh:
+        ptext = fh.read()
+    box = {}
+    orig = ns["_inputs_from"]
+    ns["_primer_text"] = lambda: ptext
+    ns["_inputs_from"] = lambda d: orig(dirs["all"] if d == "/input" else d)
+    ns["_write_output"] = lambda sheets, headers, rows, fasta: box.update(
+        sheets=sheets, headers=headers, rows=rows, fasta=fasta)
+    return ns, dirs, box
+
+
+def _base_cfg(core):
+    cfg = dict(core.CFG_DEFAULTS)
+    cfg.update(dict(core.DESIGN_DEFAULTS))
+    return cfg
+
+
+def _run_batches(ns, core, specs, cfg, meta):
+    return json.loads(ns["js_analyze_batches"](
+        json.dumps(specs), json.dumps(cfg), json.dumps(meta)))
+
+
+def check_glue(report, glue, core):
+    if not glue:
+        for n in F_NAMES:
+            report.add("F", n, SKIP,
+                       "index.html 에서 GLUE 템플릿 리터럴을 추출하지 못했습니다")
+        return
+    src = os.path.join(ROOT, TESTDATA)
+    ab1 = sorted(n for n in os.listdir(src)
+                 if n.lower().endswith(".ab1")) if os.path.isdir(src) else []
+    fa = [n for n in os.listdir(src)
+          if n.lower().endswith((".fa", ".fasta", ".fas"))] if os.path.isdir(src) else []
+    if len(ab1) < 4 or not fa:
+        for n in F_NAMES:
+            report.add("F", n, SKIP, "testdata/ 에 .ab1 4 개와 프라이머 FASTA 가 필요합니다")
+        return
+
+    root = tempfile.mkdtemp(prefix="scfvqc_glue_")
+    try:
+        try:
+            ns, dirs, box = _glue_env(glue, root)
+        except Exception as e:
+            for n in F_NAMES:
+                report.add("F", n, FAIL,
+                           "GLUE 실행 실패 %s: %s" % (type(e).__name__, e))
+            return
+        cfg = _base_cfg(core)
+        meta = {"runtime": "verify.py " + VERIFY_VERSION, "timestamp": "0",
+                "primer_file": fa[0], "batch_label": "260819", "batch_date": "260819"}
+        same = [{"dir": dirs["b1"], "vh": "VH6", "chain": "kappa"},
+                {"dir": dirs["b2"], "vh": "VH6", "chain": "kappa"}]
+
+        out = _run_batches(ns, core, same, cfg, meta)
+        if not out.get("ok"):
+            for n in F_NAMES[:4] + F_NAMES[5:]:
+                report.add("F", n, FAIL, "배치 실행 실패: " +
+                           "; ".join(out.get("errors", [])))
+            _check_glue_library(report, ns, core, cfg, meta)
+            return
+
+        # 뒤이은 실행이 box 를 덮으므로 배치 모드 시트를 여기서 떠 둡니다.
+        merged_box = dict(box)
+        _check_f1(report, out)
+        _check_f2(report, out)
+        _check_f3(report, ns, core, dirs, cfg, meta)
+        _check_f4(report, ns, core, same, cfg, meta)
+        _check_glue_library(report, ns, core, cfg, meta)
+        _check_f6(report, merged_box)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _check_f1(report, out):
+    m = out["merged"]
+    hs = sorted(set(b["result"]["config"]["param_hash"] for b in out["batches"]))
+    ds = sorted(set(b["design_hash"] for b in out["batches"]))
+    ids = [r[0] for r in m["summary"]["rows"]]
+    bad = []
+    if hs != [GLUE_EXPECT["param_hash"]]:
+        bad.append("param_hash %s" % hs)
+    if ds != [GLUE_EXPECT["design_hash"]]:
+        bad.append("design_hash %s" % ds)
+    if len(m["summary"]["rows"]) != GLUE_EXPECT["merged_rows"]:
+        bad.append("merged rows %d" % len(m["summary"]["rows"]))
+    if m["composition"]["n_good"] != GLUE_EXPECT["n_good"]:
+        bad.append("n_good %s" % m["composition"]["n_good"])
+    if m["composition"]["cdr3_median"] != GLUE_EXPECT["cdr3_median"]:
+        bad.append("cdr3_median %s" % m["composition"]["cdr3_median"])
+    if m["fasta"].count(">") != GLUE_EXPECT["fasta_n"]:
+        bad.append("fasta %d" % m["fasta"].count(">"))
+    if ids != GLUE_EXPECT["ids"]:
+        bad.append("클론 순서 %s" % [x.split("_")[2] if "_" in x else x for x in ids])
+    report.ok("F", F_NAMES[0], not bad,
+              "param %s · design %s · rows %d · n_good %d · 중앙값 %d · fasta %d · 순서 c01~c04"
+              % (GLUE_EXPECT["param_hash"], GLUE_EXPECT["design_hash"],
+                 GLUE_EXPECT["merged_rows"], GLUE_EXPECT["n_good"],
+                 GLUE_EXPECT["cdr3_median"], GLUE_EXPECT["fasta_n"]),
+              " / ".join(bad))
+
+
+def _check_f2(report, out):
+    labels = [b["label"] for b in out["batches"]]
+    cols = sorted(set(r[1] for r in out["merged"]["summary"]["rows"]))
+    ok = len(set(labels)) == len(labels) and len(cols) == len(labels)
+    report.ok("F", F_NAMES[1], ok,
+              "같은 VH x 경쇄 카드 2 개가 서로 다른 label : " + " | ".join(labels),
+              "label 이 겹칩니다 : %s (01 시트 batch 열 %s)" % (labels, cols))
+
+
+def _check_f3(report, ns, core, dirs, cfg, meta):
+    specs = [{"dir": dirs["b1"], "vh": "VH6", "chain": "kappa"},
+             {"dir": dirs["b2"], "vh": "VH2", "chain": "lambda"}]
+    out = _run_batches(ns, core, specs, cfg, meta)
+    if not out.get("ok"):
+        report.add("F", F_NAMES[2], FAIL, "실행 실패: " + "; ".join(out.get("errors", [])))
+        return
+    flags = {}
+    for b in out["batches"]:
+        for c in b["result"]["calls"]:
+            flags[c["id"]] = c["flags"]
+    f3 = flags.get(GLUE_EXPECT["ids"][2], [])
+    f4 = flags.get(GLUE_EXPECT["ids"][3], [])
+    d1, d2 = out["batches"][0]["design_hash"], out["batches"][1]["design_hash"]
+    bad = []
+    if "WRONG_CHAIN" not in f3:
+        bad.append("c03 flags %s" % f3)
+    if "WRONG_FAMILY" not in f4 or "WRONG_CHAIN" not in f4:
+        bad.append("c04 flags %s" % f4)
+    if d1 == d2:
+        bad.append("design_hash 가 같음 %s" % d1)
+    report.ok("F", F_NAMES[2], not bad,
+              "c03 WRONG_CHAIN · c04 WRONG_FAMILY+WRONG_CHAIN · design_hash %s != %s"
+              % (d1, d2), " / ".join(bad))
+
+
+def _check_f4(report, ns, core, specs, cfg, meta):
+    real = ns["core"]
+    ns["core"] = _ShimCore(real)
+    try:
+        out = _run_batches(ns, core, specs, cfg, meta)
+    finally:
+        ns["core"] = real
+    errs = out.get("errors") or []
+    ok = (not out.get("ok")) and any("param_hash" in e for e in errs)
+    report.ok("F", F_NAMES[3], ok,
+              "두 번째 배치의 param_hash 를 바꾸면 ok=false · " +
+              (errs[0][:40] if errs else ""),
+              "ok=%s errors=%s (불일치를 통과시켰습니다)" % (out.get("ok"), errs))
+
+
+def _check_glue_library(report, ns, core, cfg, meta):
+    lib = dict(cfg)
+    lib["analysis_mode"] = core.MODE_LIBRARY
+    out = json.loads(ns["js_analyze"](json.dumps(lib), json.dumps(meta)))
+    if not out.get("ok"):
+        report.add("F", F_NAMES[4], FAIL, "실행 실패: " + "; ".join(out.get("errors", [])))
+        return
+    bad = []
+    if out["config"]["design_hash"] != GLUE_EXPECT["lib_design_hash"]:
+        bad.append("design_hash %s" % out["config"]["design_hash"])
+    if out["composition"]["batch_vh_match"] is not None:
+        bad.append("batch_vh_match %s" % out["composition"]["batch_vh_match"])
+    if len(out["summary"]["rows"]) != GLUE_EXPECT["merged_rows"]:
+        bad.append("rows %d" % len(out["summary"]["rows"]))
+    report.ok("F", F_NAMES[4], not bad,
+              "design_hash %s · batch_vh_match None · rows %d"
+              % (GLUE_EXPECT["lib_design_hash"], GLUE_EXPECT["merged_rows"]),
+              " / ".join(bad))
+
+
+def _check_f6(report, box):
+    sheets = box.get("sheets")
+    if not sheets:
+        report.add("F", F_NAMES[5], FAIL, "_write_output 이 호출되지 않았습니다")
+        return
+    titles = [s["title"] for s in sheets]
+    bad = []
+    if titles != GLUE_EXPECT["titles"]:
+        bad.append("시트 제목 %s" % titles)
+    n01 = len(sheets[0]["rows"]) if sheets else 0
+    if n01 != GLUE_EXPECT["sheet01_rows"]:
+        bad.append("01 행 %d" % n01)
+    s04 = [s for s in sheets if s["title"].startswith("04")]
+    marks = [r[1] for r in s04[0]["rows"] if r and r[0] == "배치"] if s04 else []
+    if len(marks) != GLUE_EXPECT["block04"] or "전체 합계" not in marks:
+        bad.append("04 블록 표시 %s" % marks)
+    report.ok("F", F_NAMES[5], not bad,
+              "7 시트 · 01 %d 행 · 04 블록 %d 개(배치 2 + 전체 1)"
+              % (GLUE_EXPECT["sheet01_rows"], GLUE_EXPECT["block04"]),
+              " / ".join(bad))
+
+
+# =============================================================================
 #  실행
 # =============================================================================
 def main():
@@ -1441,7 +1703,13 @@ def main():
         guard(report, "E", "check_landmark 단위", check_landmark_units, report, core)
         guard(report, "E", "스터퍼 길이 판정 단위", check_stuffer_units, report, core)
 
-    guard(report, "E", "badge() 랜드마크 상태 5 종", check_badge_states, report, js)
+    guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
+
+    if core is not None:
+        guard(report, "F", "GLUE 경로", check_glue, report, glue, core)
+    else:
+        for n in F_NAMES:
+            report.add("F", n, FAIL, "core.py 를 불러올 수 없어 GLUE 를 돌리지 못했습니다")
 
     ver = "core %s / notebook %s" % (core.CORE_VERSION, core.NB_VERSION) \
         if core is not None else "core.py 불러오기 실패"
@@ -1450,7 +1718,7 @@ def main():
     print_table(report)
     print("")
     parts = []
-    for s in ("A", "B", "C", "D", "E"):
+    for s in ("A", "B", "C", "D", "E", "F"):
         parts.append("[%s] 통과 %d 실패 %d 건너뜀 %d"
                      % (s, report.count(s, PASS), report.count(s, FAIL),
                         report.count(s, SKIP)))
