@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.1"
+CORE_VERSION = "2.2"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -182,7 +182,9 @@ CDNA_OPTS = ["oligo(dT)", "random hexamer", "혼합/불명"]
 # 완성 후에는 지정 없이 라이브러리 전체를 판정합니다(library).
 MODE_ASSIGNED = "assigned"
 MODE_LIBRARY = "library"
-MODE_OPTS = [MODE_ASSIGNED, MODE_LIBRARY]
+MODE_NEGCTRL = "negctrl"
+# 앞 두 값의 문자열과 순서는 바꾸지 않습니다. 바꾸면 기존 design_hash 가 깨집니다.
+MODE_OPTS = [MODE_ASSIGNED, MODE_LIBRARY, MODE_NEGCTRL]
 
 DESIGN_DEFAULTS = [
     ("analysis_mode", MODE_ASSIGNED),
@@ -230,7 +232,8 @@ JUDGMENT_DESIGN_KEYS = ["analysis_mode", "batch_vh_family", "batch_chain",
 DESIGN_DOC = [
     ("analysis_mode", "분석 모드",
      "assigned = VH family 와 경쇄를 지정하고 대조한다. "
-     "library = 지정 없이 프라이머로만 판정한다"),
+     "library = 지정 없이 프라이머로만 판정한다. "
+     "negctrl = 벡터만 ligation 한 음성 대조군. 기대값이 정반대라 판정 어휘가 다르다"),
     ("f1_for_mode", "Fragment 1 For", "VH FR1 프라이머를 family 별로 나눠 PCR 했는지"),
     ("f1_rev_mode", "Fragment 1 Rev", "CDR3 경계 프라이머"),
     ("f2_for_mode", "Fragment 2 For", "CDR3 경계 프라이머"),
@@ -1387,6 +1390,46 @@ def glossary():
         ["판정 코드", "HETERO_JOIN?",
          "CDR3 경계가 FR1 이 부른 family 와 부정합. fragment 1 / 2 이종 조립 의심 (약한 증거)."],
 
+        ["대조군 판정", "음성 대조군 모드",
+         "벡터만 ligation 한 대조군을 읽는 모드다. 기대값이 일반 배치와 정반대여서 "
+         "판정 어휘가 다르다. 일반 배치에서 PASS 는 성공이지만 대조군에서 완전한 "
+         "scFv 가 나오면 오염이다. 구조 QC(qc_one)는 동일하게 돌리고 그 결과를 "
+         "대조군 관점으로 다시 읽는다. 아래 순서로 먼저 맞는 것을 판정으로 쓴다."],
+        ["대조군 판정", "CONCATEMER",
+         "NotI / AscI / 링커가 2 회 이상 검출. 벡터가 여러 번 이어붙은 구조 이상이라 "
+         "다른 어떤 해석보다 먼저 잡는다."],
+        ["대조군 판정", "MIXED",
+         "트레이스 2 순위 피크 비율이 임계를 넘음. 콜로니 하나를 집지 못한 것이므로 "
+         "인서트 해석 자체를 신뢰할 수 없다."],
+        ["대조군 판정", "EMPTY_VECTOR",
+         "NotI 또는 AscI 미검출. 클로닝 자리가 파괴된 채 재결합한 벡터다. "
+         "음성 대조군에서 기대되는 배경 유형이다."],
+        ["대조군 판정", "PARENTAL",
+         "스터퍼 서열 검출. 미절단 또는 단일절단 벡터가 그대로 살아남은 것이다. "
+         "벡터 준비물을 새로 만들면 주된 유형이 될 수 있다."],
+        ["대조군 판정", "PARENTAL?",
+         "인서트 길이가 스터퍼 보유 클론과 같으나(%d bp) 스터퍼 서열은 미검출. "
+         "read 앞쪽 품질 저하로 놓쳤을 수 있어 확정하지 않는다."
+         % CONST["STUFFER_INSERT_BP"]],
+        ["대조군 판정", "CONTAMINATED",
+         "링커 검출 + 프레임 정상 + 인서트가 설정 범위 내. 즉 완전한 scFv 가 "
+         "들어갔다. 음성 대조군에는 인서트를 넣지 않았으므로 ligation 단계에서 "
+         "인서트가 섞여 들어갔다는 뜻이다. 대조군 판정 중 가장 심각하며, 같은 "
+         "반응에서 나온 본 실험 결과 전체의 신뢰도에 영향을 준다."],
+        ["대조군 판정", "CARRYOVER",
+         "인서트는 있으나 링커 미검출. scFv 가 아닌 무언가가 들어간 것이다. "
+         "CONTAMINATED 가 ligation 단계에서 인서트가 섞인 것이라면, 이쪽은 벡터 "
+         "준비물이나 공용 시약에 이미 다른 DNA 가 있었을 가능성을 가리킨다. "
+         "들어간 것이 무엇인지는 06_서열의 인서트 염기서열로 직접 확인해야 한다."],
+        ["대조군 판정", "CHECK",
+         "위 어디에도 맞지 않음. 억지로 분류하지 않고 남긴다. 이 값이 나오면 "
+         "분류 규칙이 실제 벡터 거동을 못 따라가고 있다는 신호이므로 서열을 "
+         "직접 보고 유형을 추가할지 판단한다."],
+        ["대조군 판정", "인서트 md5",
+         "인서트 염기서열의 지문. 음성 대조군에는 인서트를 넣지 않았으므로, 같은 "
+         "지문이 본 실험 결과에도 있으면 같은 분자가 양쪽에 있다는 뜻이다. 모드별로 "
+         "파일이 분리되어 자동 대조는 하지 않으니 사람이 대조한다."],
+
         ["고정 상수", "두 계층 CONST 와 RULES",
          "코드에 고정된 값은 두 종류다. CONST 는 서열과 프레임 규칙, RULES 는 알고리즘 규칙"
          "(정렬 점수·탐색 범위·플래그 심각도)이다. 둘 다 UI 로 바꿀 수 없고 param_hash 에도 "
@@ -1476,6 +1519,8 @@ def build_summary(qc_results, calls, cfg, meta=None):
 
 def build_sheets(qc_results, calls, cfg, comp, meta):
     """xlsx 시트 데이터를 순서대로 담은 리스트를 반환한다."""
+    if cfg.get("analysis_mode") == MODE_NEGCTRL:
+        return build_negctrl_sheets(qc_results, cfg, meta)
     by_id = {p["id"]: p for p in calls}
     sheets = []
 
@@ -1486,39 +1531,7 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
         "note": "최종판정 = 구조QC 통과 AND 프라이머 판별 플래그 없음. "
                 "각 컬럼의 정의는 06_용어설명 시트 참조."})
 
-    # 02 구조QC상세
-    h2 = ["clone", "구조QC", "플래그", "원본길이(bp)", "트리밍구간", "사용길이(bp)",
-          "NotI위치", "NotI개수", "링커위치", "링커개수", "AscI위치", "AscI개수",
-          "인서트(bp)", "프레임(%3)", "d1(bp)", "d2(bp)"]
-    for k in ("QC1", "QC2", "QC3", "QC4"):
-        h2 += [k + "상태", k + "치환", k + "갭", k + "최저Q"]
-    h2 += ["번역길이(aa)", "내부종결", "스터퍼", "탠덤반복구간", "탠덤반복주기(nt)",
-           "탠덤반복단위", "혼합(%)", "검사위치수", "비고"]
-    r2 = []
-    for r in qc_results:
-        rep = r["repeat"] or {}
-        row = [r["id"], r["verdict"], ", ".join(r["flags"]) or "-",
-               r["raw_len"], "%d-%d" % (r["trim_lo"], r["trim_hi"]), r["used_bp"],
-               r["pos_notI"] + 1 if r["pos_notI"] >= 0 else None, r["n_notI"],
-               r["pos_link"] + 1 if r["pos_link"] >= 0 else None, r["n_link"],
-               r["pos_ascI"] + 1 if r["pos_ascI"] >= 0 else None, r["n_ascI"],
-               r["insert_bp"],
-               (r["insert_bp"] % 3) if r["insert_bp"] is not None else None,
-               r["d1"], r["d2"]]
-        for k in ("QC1", "QC2", "QC3", "QC4"):
-            row += [r["qc"][k]["status"], r["qc"][k]["sub"],
-                    r["qc"][k]["gap"], r["qc"][k]["minq"]]
-        row += [r["aa_len"], _STOP_TXT[r["stop_ok"]], _yn(r["stuffer"]),
-                rep.get("region", "-"), rep.get("period"), rep.get("unit", "-"),
-                round(r["mix_pct"], 2) if r["mix_pct"] is not None else None,
-                r["mix_n"], " / ".join(r["notes"]) or "-"]
-        r2.append(row)
-    sheets.append({
-        "title": "02_구조QC상세", "headers": h2, "rows": r2,
-        "wrap": [len(h2) - 1], "maxw": 60,
-        "note": "위치는 트리밍 후 서열 기준 1-based. 랜드마크 상태 표기"
-                "(OK / S#G# / GAP# / ABSENT / NA)는 06_용어설명 참조."})
-
+    sheets.append(_sheet_struct_qc(qc_results, "02_구조QC상세"))
     # 03 프라이머판별
     h3 = ["clone", "그룹", "대상", "판정 family", "후보 프라이머", "후보수",
           "미스매치", "Δ(차순위간격)", "판별구간(nt)", "불일치위치(1-based)",
@@ -1591,7 +1604,65 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
         "title": "04_배치조성", "headers": h4, "rows": r4, "wrap": [3], "maxw": 60,
         "note": "구조QC 와 프라이머 판별을 모두 통과한 클론만 집계합니다."})
 
-    # 05 실행설정
+    sheets.append(_sheet_config(cfg, meta, "05_실행설정"))
+    sheets.append(_sheet_glossary("06_용어설명"))
+
+    # 07 서열
+    h7 = ["clone", "최종판정", "인서트 길이(bp)", "인서트 염기서열 (NotI~AscI)",
+          "scFv 길이(aa)", "scFv 아미노산 서열", "CDR3-H3"]
+    r7 = []
+    for r in qc_results:
+        p = by_id[r["id"]]
+        r7.append([r["id"], final_verdict(r, p), r["insert_bp"], insert_seq(r),
+                   r["aa_len"], r["prot"], p["cdr3"] or "-"])
+    sheets.append({
+        "title": "07_서열", "headers": h7, "rows": r7, "wrap": [3, 5], "maxw": 60,
+        "note": "인서트는 NotI 인식서열 첫 염기부터 AscI 인식서열 마지막 염기까지입니다."})
+    return sheets
+
+
+# --- 여러 모드가 함께 쓰는 시트 --------------------------------------------
+def _sheet_struct_qc(qc_results, title):
+    h2 = ["clone", "구조QC", "플래그", "원본길이(bp)", "트리밍구간", "사용길이(bp)",
+          "NotI위치", "NotI개수", "링커위치", "링커개수", "AscI위치", "AscI개수",
+          "인서트(bp)", "프레임(%3)", "d1(bp)", "d2(bp)"]
+    for k in ("QC1", "QC2", "QC3", "QC4"):
+        h2 += [k + "상태", k + "치환", k + "갭", k + "최저Q"]
+    h2 += ["번역길이(aa)", "내부종결", "스터퍼", "탠덤반복구간", "탠덤반복주기(nt)",
+           "탠덤반복단위", "혼합(%)", "검사위치수", "비고"]
+    r2 = []
+    for r in qc_results:
+        rep = r["repeat"] or {}
+        row = [r["id"], r["verdict"], ", ".join(r["flags"]) or "-",
+               r["raw_len"], "%d-%d" % (r["trim_lo"], r["trim_hi"]), r["used_bp"],
+               r["pos_notI"] + 1 if r["pos_notI"] >= 0 else None, r["n_notI"],
+               r["pos_link"] + 1 if r["pos_link"] >= 0 else None, r["n_link"],
+               r["pos_ascI"] + 1 if r["pos_ascI"] >= 0 else None, r["n_ascI"],
+               r["insert_bp"],
+               (r["insert_bp"] % 3) if r["insert_bp"] is not None else None,
+               r["d1"], r["d2"]]
+        for k in ("QC1", "QC2", "QC3", "QC4"):
+            row += [r["qc"][k]["status"], r["qc"][k]["sub"],
+                    r["qc"][k]["gap"], r["qc"][k]["minq"]]
+        row += [r["aa_len"], _STOP_TXT[r["stop_ok"]], _yn(r["stuffer"]),
+                rep.get("region", "-"), rep.get("period"), rep.get("unit", "-"),
+                round(r["mix_pct"], 2) if r["mix_pct"] is not None else None,
+                r["mix_n"], " / ".join(r["notes"]) or "-"]
+        r2.append(row)
+    return {"title": title, "headers": h2, "rows": r2,
+            "wrap": [len(h2) - 1], "maxw": 60,
+            "note": "위치는 트리밍 후 서열 기준 1-based. 랜드마크 상태 표기"
+                    "(OK / S#G# / GAP# / ABSENT / NA)는 용어설명 시트 참조."}
+
+
+def _sheet_glossary(title):
+    return {"title": title, "headers": ["구분", "용어 / 컬럼", "설명"],
+            "rows": glossary(), "wrap": [2], "maxw": 110,
+            "note": "이 도구를 처음 보는 사람도 이 시트만으로 모든 컬럼과 판정을 "
+                    "이해할 수 있도록 정리했습니다."}
+
+
+def _sheet_config(cfg, meta, title):
     h5 = ["구분", "항목", "값", "기본값", "기본값과 동일", "설명"]
     r5 = [["실행", "core 버전", cfg["core_version"], "", "", "기준 노트북 v" + cfg["nb_version"]],
           ["실행", "실행 환경", meta.get("runtime", ""), "", "", ""],
@@ -1619,36 +1690,161 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
         r5.append(["고정 상수 (서열)", k, str(CONST[k]), "", "(코드 고정)", desc])
     for k, desc in RULES_DOC:
         r5.append(["고정 상수 (알고리즘)", k, rule_value_text(k), "", "(코드 고정)", desc])
-    sheets.append({
-        "title": "05_실행설정", "headers": h5, "rows": r5, "wrap": [5], "maxw": 60,
-        "note": "이 배치의 판정에 실제로 쓰인 값 전부입니다. "
-                "'기본값과 동일' 이 X 인 항목은 결과에 직접 영향을 줍니다."})
-
-    # 06 용어설명
-    sheets.append({
-        "title": "06_용어설명", "headers": ["구분", "용어 / 컬럼", "설명"],
-        "rows": glossary(), "wrap": [2], "maxw": 110,
-        "note": "이 도구를 처음 보는 사람도 이 시트만으로 모든 컬럼과 판정을 "
-                "이해할 수 있도록 정리했습니다."})
-
-    # 07 서열
-    h7 = ["clone", "최종판정", "인서트 길이(bp)", "인서트 염기서열 (NotI~AscI)",
-          "scFv 길이(aa)", "scFv 아미노산 서열", "CDR3-H3"]
-    r7 = []
-    for r in qc_results:
-        p = by_id[r["id"]]
-        r7.append([r["id"], final_verdict(r, p), r["insert_bp"], insert_seq(r),
-                   r["aa_len"], r["prot"], p["cdr3"] or "-"])
-    sheets.append({
-        "title": "07_서열", "headers": h7, "rows": r7, "wrap": [3, 5], "maxw": 60,
-        "note": "인서트는 NotI 인식서열 첫 염기부터 AscI 인식서열 마지막 염기까지입니다."})
-    return sheets
+    return {"title": title, "headers": h5, "rows": r5, "wrap": [5], "maxw": 60,
+            "note": "이 배치의 판정에 실제로 쓰인 값 전부입니다. "
+                    "'기본값과 동일' 이 X 인 항목은 결과에 직접 영향을 줍니다."}
 
 
 def insert_seq(r):
     if r["pos_notI"] >= 0 and r["pos_ascI"] > r["pos_notI"]:
         return r["seq"][r["pos_notI"]:r["pos_ascI"] + len(CONST["AscI"])]
     return ""
+
+
+# =============================================================================
+#  12-2. 음성 대조군
+# =============================================================================
+# 벡터만 ligation 한 대조군은 기대값이 정반대입니다. 일반 배치에서 PASS 는
+# 성공이지만 대조군에서 완전한 scFv 가 나오면 오염 신호입니다.
+# qc_one 은 손대지 않고, 그 결과를 대조군 관점으로 다시 읽기만 합니다.
+#
+# 분류는 "무엇이 관측됐나" 가 아니라 "벡터에 무엇이 들어갈 수 있나" 로 짰습니다.
+# 스터퍼 보유(PARENTAL)는 지금 표본에 없어도 벡터 준비물을 새로 만들면 주된
+# 유형이 될 수 있어 분기를 둡니다. 어디에도 맞지 않으면 억지로 끼우지 않고
+# CHECK 로 남깁니다.
+NEGCTRL_VERDICTS = [
+    "CONCATEMER", "MIXED", "EMPTY_VECTOR", "PARENTAL", "PARENTAL?",
+    "CONTAMINATED", "CARRYOVER", "CHECK",
+]
+
+# 화면 색 구분에만 쓰는 등급입니다. verdict 선택 우선순위는 negctrl_verdict 의
+# 판정 순서로 고정되어 있고 이 등급을 쓰지 않습니다. FLAG_SEV 도 쓰지 않습니다.
+NEGCTRL_LEVEL = {
+    "CONTAMINATED": "fail",     # 완전한 scFv 가 들어감
+    "EMPTY_VECTOR": "none",     # 대조군에서 기대되는 배경
+    "CONCATEMER": "check", "MIXED": "check", "PARENTAL": "check",
+    "PARENTAL?": "check", "CARRYOVER": "check", "CHECK": "check",
+}
+
+
+NEGCTRL_TABLE_HEADERS = ["clone", "판정", "근거", "인서트(bp)", "인서트 md5"]
+
+
+def _neg_facts(r):
+    ins = r["insert_bp"]
+    return {
+        "notI": "NotI " + ("검출" if r["pos_notI"] >= 0 else "미검출"),
+        "ascI": "AscI " + ("검출" if r["pos_ascI"] >= 0 else "미검출"),
+        "link": "링커 " + ("검출" if r["pos_link"] >= 0 else "미검출"),
+        "ins": "인서트 " + ("%d bp" % ins if ins is not None else "계산 불가"),
+        "stuf": "스터퍼 " + ("검출" if r["stuffer"] else "미검출"),
+    }
+
+
+def negctrl_verdict(r, cfg):
+    """대조군 클론 하나를 (verdict, reason) 으로 읽는다. 위에서부터 먼저 맞는 것."""
+    f = _neg_facts(r)
+    ins = r["insert_bp"]
+    if max(r["n_notI"], r["n_ascI"], r["n_link"]) > 1:
+        return "CONCATEMER", ("NotI %d / AscI %d / 링커 %d 회 검출 (각 1 회여야 함)"
+                              % (r["n_notI"], r["n_ascI"], r["n_link"]))
+    if r["mix_pct"] is not None and r["mix_pct"] > cfg["mix_pct"]:
+        return "MIXED", ("2순위 피크 초과 위치 %.1f%% (임계 %.1f%%)"
+                         % (r["mix_pct"], cfg["mix_pct"]))
+    if r["pos_notI"] < 0 or r["pos_ascI"] < 0:
+        return "EMPTY_VECTOR", " · ".join([f["notI"], f["ascI"], f["link"]])
+    if r["stuffer"]:
+        return "PARENTAL", " · ".join(["스터퍼 서열 검출", f["ins"]])
+    if ins is not None and ins == CONST["STUFFER_INSERT_BP"]:
+        return "PARENTAL?", " · ".join([f["ins"] + " (스터퍼 길이와 동일)", f["stuf"]])
+    if (r["pos_link"] >= 0 and ins is not None
+            and ins % 3 == CONST["FRAME_MOD"]
+            and cfg["insert_min"] <= ins <= cfg["insert_max"]):
+        return "CONTAMINATED", " · ".join(
+            [f["link"], f["ins"] + " (범위 %d~%d)" % (cfg["insert_min"], cfg["insert_max"]),
+             "프레임 정상"])
+    if ins is not None and r["pos_link"] < 0:
+        return "CARRYOVER", " · ".join([f["link"], f["ins"], f["stuf"]])
+    return "CHECK", " · ".join([f["notI"], f["ascI"], f["link"], f["ins"], f["stuf"]])
+
+
+def insert_md5(r):
+    """인서트 염기서열의 지문. 다른 모드 결과와 수기 대조하기 위한 것입니다."""
+    s = insert_seq(r)
+    return hashlib.md5(s.encode("ascii")).hexdigest() if s else ""
+
+
+def negctrl_summary(qc_results, cfg):
+    """대조군 집계. 비율이나 배경률은 내지 않습니다 (n 이 작아 정당화되지 않음)."""
+    counts = dict((v, 0) for v in NEGCTRL_VERDICTS)
+    clones = []
+    for r in qc_results:
+        v, why = negctrl_verdict(r, cfg)
+        counts[v] = counts.get(v, 0) + 1
+        clones.append({"id": r["id"], "verdict": v, "reason": why,
+                       "insert_bp": r["insert_bp"], "insert_md5": insert_md5(r),
+                       "level": NEGCTRL_LEVEL.get(v, "check")})
+    return {"n_total": len(qc_results),
+            "counts": [[v, counts[v]] for v in NEGCTRL_VERDICTS],
+            "clones": clones,
+            # 화면 표도 컬럼명을 여기서 받아 갑니다. index.html 이 따로 들고 있지
+            # 않도록 01_대조군판정 시트와 같은 상수를 씁니다.
+            "table": {"headers": list(NEGCTRL_TABLE_HEADERS),
+                      "rows": [[c["id"], c["verdict"], c["reason"],
+                                c["insert_bp"], c["insert_md5"]] for c in clones]},
+            "fingerprints": sorted(set(c["insert_md5"] for c in clones if c["insert_md5"]))}
+
+
+def build_negctrl_sheets(qc_results, cfg, meta):
+    """대조군 워크북. 프라이머 판별과 배치 조성은 인서트가 scFv 가 아니라 뺍니다."""
+    neg = negctrl_summary(qc_results, cfg)
+    by_id = dict((c["id"], c) for c in neg["clones"])
+
+    h1 = list(NEGCTRL_TABLE_HEADERS) + \
+        ["NotI위치", "링커위치", "AscI위치", "스터퍼", "프레임(%3)"]
+    r1 = []
+    for r in qc_results:
+        c = by_id[r["id"]]
+        ins = r["insert_bp"]
+        r1.append([r["id"], c["verdict"], c["reason"], ins, c["insert_md5"],
+                   r["pos_notI"] + 1 if r["pos_notI"] >= 0 else None,
+                   r["pos_link"] + 1 if r["pos_link"] >= 0 else None,
+                   r["pos_ascI"] + 1 if r["pos_ascI"] >= 0 else None,
+                   _yn(r["stuffer"]), (ins % 3) if ins is not None else None])
+    sheets = [{"title": "01_대조군판정", "headers": h1, "rows": r1,
+               "wrap": [2], "maxw": 70,
+               "note": "음성 대조군은 기대값이 반대입니다. 완전한 scFv 가 나오면 "
+                       "오염입니다. 판정 코드의 뜻은 05_용어설명 참조."}]
+
+    sheets.append(_sheet_struct_qc(qc_results, "02_구조QC상세"))
+
+    h3 = ["구분", "항목", "값", "비고"]
+    r3 = [["개요", "분석 클론 수", neg["n_total"], ""]]
+    for v, n in neg["counts"]:
+        r3.append(["유형", v, n, NEGCTRL_LEVEL.get(v, "")])
+    for fp in neg["fingerprints"]:
+        ids = [c["id"] for c in neg["clones"] if c["insert_md5"] == fp]
+        r3.append(["인서트 지문", fp, ", ".join(ids),
+                   "다른 모드 결과의 같은 지문과 대조하세요. 모드별로 파일이 "
+                   "분리되므로 자동 대조는 하지 않습니다."])
+    if not neg["fingerprints"]:
+        r3.append(["인서트 지문", "-", "", "인서트가 계산된 클론이 없습니다"])
+    sheets.append({"title": "03_대조군요약", "headers": h3, "rows": r3,
+                   "wrap": [3], "maxw": 70,
+                   "note": "관측 사실만 적습니다. 비율·배경률 추정과 해석은 "
+                           "넣지 않았습니다."})
+
+    sheets.append(_sheet_config(cfg, meta, "04_실행설정"))
+    sheets.append(_sheet_glossary("05_용어설명"))
+
+    h6 = ["clone", "판정", "인서트 길이(bp)", "인서트 염기서열 (NotI~AscI)", "인서트 md5"]
+    r6 = [[r["id"], by_id[r["id"]]["verdict"], r["insert_bp"], insert_seq(r),
+           by_id[r["id"]]["insert_md5"]] for r in qc_results]
+    sheets.append({"title": "06_서열", "headers": h6, "rows": r6,
+                   "wrap": [3], "maxw": 70,
+                   "note": "IMGT 조회나 수기 대조용입니다. 인서트는 NotI 인식서열 "
+                           "첫 염기부터 AscI 인식서열 마지막 염기까지입니다."})
+    return sheets
 
 
 def build_fasta(qc_results, calls, line_width=60):
@@ -1805,6 +2001,9 @@ def analyze(files, primer_text="", overrides=None, meta=None):
         "qc": pub_qc,
         "calls": pub_calls,
         "composition": comp,
+        # 대조군 모드에서만 채웁니다. 키는 항상 있어야 화면 쪽 계약이 흔들리지 않습니다.
+        "negctrl": (negctrl_summary(qc_results, cfg)
+                    if cfg["analysis_mode"] == MODE_NEGCTRL else None),
         "summary": {"headers": SUMMARY_HEADERS, "rows": summary_rows},
         "sheets": sheets,
         "fasta": build_fasta(qc_results, calls),

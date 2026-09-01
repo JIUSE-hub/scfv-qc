@@ -63,7 +63,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "2.0"
+VERIFY_VERSION = "2.1"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -846,11 +846,35 @@ def check_analysis_mode(report, core):
     if "analysis_mode" not in core.JUDGMENT_DESIGN_KEYS:
         bad.append("JUDGMENT_DESIGN_KEYS 에 analysis_mode 없음")
     # index.html 은 modeOpts 의 순서로 탭 이름을 붙이므로 순서가 계약입니다.
-    if list(core.MODE_OPTS) != [core.MODE_ASSIGNED, core.MODE_LIBRARY]:
-        bad.append("MODE_OPTS 순서가 [MODE_ASSIGNED, MODE_LIBRARY] 가 아님")
+    # 앞 두 값의 순서가 바뀌면 기존 design_hash 도 깨집니다.
+    want = [core.MODE_ASSIGNED, core.MODE_LIBRARY, core.MODE_NEGCTRL]
+    if list(core.MODE_OPTS) != want:
+        bad.append("MODE_OPTS 가 %s 가 아님" % want)
     report.ok("B", "analysis_mode 모드 값", not bad,
               "기본값 %s · MODE_OPTS %s · design_hash 대상"
               % (default, "/".join(core.MODE_OPTS)),
+              " / ".join(bad))
+
+
+def check_negctrl_vocab(report, core, html):
+    """대조군 verdict 가 전부 용어설명과 index.html badge 에서 처리되는가."""
+    verdicts = list(core.NEGCTRL_VERDICTS)
+    terms = set(t for cat, t, _d in core.glossary() if cat == "대조군 판정")
+    no_doc = [v for v in verdicts if v not in terms]
+    no_level = [v for v in verdicts if v not in core.NEGCTRL_LEVEL]
+    # index.html 은 등급 -> CSS 클래스만 들고 있습니다. 그 표에 빠진 등급이 있으면
+    # 해당 verdict 가 기본색으로 떨어집니다.
+    m = re.search(r"const\s+NEG_CLS\s*=\s*\{([^}]*)\}", html)
+    cls_keys = set(re.findall(r"([A-Za-z_]\w*)\s*:", m.group(1))) if m else set()
+    levels = sorted(set(core.NEGCTRL_LEVEL[v] for v in verdicts if v in core.NEGCTRL_LEVEL))
+    no_cls = ([] if m else ["NEG_CLS 를 찾지 못함"]) + \
+             [lv for lv in levels if lv not in cls_keys]
+    bad = (["용어설명 없음: " + ", ".join(no_doc)] if no_doc else []) + \
+          (["등급 없음: " + ", ".join(no_level)] if no_level else []) + \
+          (["badge 등급 미처리: " + ", ".join(no_cls)] if no_cls else [])
+    report.ok("B", "대조군 verdict 처리", not bad,
+              "%d 종 · 용어설명 %d · 등급 %s 전부 badge 처리"
+              % (len(verdicts), len(verdicts), "/".join(levels)),
               " / ".join(bad))
 
 
@@ -980,10 +1004,17 @@ def check_no_label_leak(report, html, core):
 
 
 def check_no_mode_leak(report, html, core):
-    """분석 모드 값은 core 에서 읽어야 합니다. index.html 에 리터럴로 있으면 실패."""
-    hits = [m for m in core.MODE_OPTS if m and m in html]
+    """분석 모드 값은 core 에서 읽어야 합니다. index.html 에 리터럴로 있으면 실패.
+
+    서열·라벨과 달리 모드 값은 식별자라서 analyze 반환 키(M.negctrl)나 core 함수
+    이름(negctrl_summary)처럼 하드코딩이 아닌 곳에도 같은 글자가 나옵니다. 그래서
+    원문 전체가 아니라 따옴표 안의 문자열 리터럴만 봅니다 — 모드 값을 코드에
+    박아 넣으려면 반드시 문자열 리터럴이어야 하기 때문입니다.
+    """
+    lits = js_strings(html)
+    hits = [m for m in core.MODE_OPTS if m and any(m in x for x in lits)]
     report.ok("C", "모드 값이 index.html 에 등장", not hits,
-              "MODE_OPTS %d 개 전부 미등장 (js_docs 의 modeOpts 로 전달)"
+              "MODE_OPTS %d 개 전부 문자열 리터럴에 없음 (js_docs 의 modeOpts 로 전달)"
               % len(core.MODE_OPTS),
               "index.html 에 하드코딩됨: " + ", ".join(hits))
 
@@ -1291,6 +1322,76 @@ def check_stuffer_units(report, core):
                   % (r["insert_bp"], want, unwanted, r["verdict"]),
                   "insert %s (기대 %d) · flags %s (%s 포함 / %s 미포함 이어야 함)"
                   % (r["insert_bp"], want_bp, r["flags"], want, unwanted))
+
+
+# --- 대조군 판정 분기 합성 시험 ------------------------------------------------
+# 실측 대조군으로는 두 분기 정도만 실행됩니다. 나머지는 합성 read 로 덮습니다.
+# (변형종류, 인자, 기대 verdict)
+NEG_CASES = [
+    ("N1", "스터퍼 서열 검출",        "stuffer",  None, "PARENTAL"),
+    ("N2", "인서트가 스터퍼 길이",     "len386",   None, "PARENTAL?"),
+    ("N3", "완전한 scFv 가 들어감",    "scfv",     None, "CONTAMINATED"),
+    ("N4", "인서트 있으나 링커 없음",  "nolink",   None, "CARRYOVER"),
+    ("N5", "AscI 미검출",             "noascI",   None, "EMPTY_VECTOR"),
+    ("N6", "NotI 2 회",               "concat",   None, "CONCATEMER"),
+    ("N7", "트레이스 혼합",           "mixed",    None, "MIXED"),
+    ("N8", "어느 분류에도 안 맞음",    "check",    None, "CHECK"),
+]
+
+
+def synth_neg_read(core, kind):
+    """대조군 분기용 합성 read. 이슈 6 의 합성 read 방식을 그대로 씁니다."""
+    C = core.CONST
+    q1off = C["QC1"].find(C["NotI"])
+    span = len(C["QC1"]) - q1off + len(C["AscI"])
+    fill = UNIT_FILL * 400
+
+    def build(mid, tail=True, extra=""):
+        seq = (C["PELB_ATG"] + "GGG" + C["QC1"] + mid +
+               (C["QC3"] + C["QC4"] if tail else fill[:60]) + extra + "A" * 20)
+        return {"id": "syn", "clone": "syn", "batch": "", "date": "", "primer": "",
+                "filename": "syn.ab1", "raw_len": len(seq), "raw_seq": seq,
+                "raw_qual": [], "trace": {}, "ploc": []}
+
+    if kind == "stuffer":                      # 스터퍼 + 길이 386
+        n = C["STUFFER_INSERT_BP"] - span
+        return build((C["STUFFER"] + fill)[:n])
+    if kind == "len386":                       # 길이만 386, 스터퍼 없음
+        return build(fill[:C["STUFFER_INSERT_BP"] - span])
+    if kind == "scfv":                         # 링커 + 프레임 정상 + 범위 내
+        for n in range(300, 900):
+            ins = span + n + len(C["QC2"])
+            if ins % 3 == C["FRAME_MOD"] and 700 <= ins <= 800:
+                half = n // 2
+                return build(fill[:half] + C["QC2"] + fill[:n - half])
+        return build(fill[:700])
+    if kind == "nolink":                       # 인서트 있고 링커 없음
+        return build(fill[:200])
+    if kind == "noascI":                       # AscI 없음
+        return build(fill[:200], tail=False)
+    if kind == "concat":                       # NotI 2 회
+        return build(fill[:200], extra=C["NotI"])
+    if kind == "check":                        # 링커 있는데 프레임/범위가 안 맞음
+        return build(fill[:100] + C["QC2"] + fill[:100])
+    return build(fill[:200])
+
+
+def check_negctrl_units(report, core):
+    cfg = core.build_config({"analysis_mode": core.MODE_NEGCTRL}, [])
+    for tag, label, kind, _arg, want in NEG_CASES:
+        read = synth_neg_read(core, kind)
+        if kind == "mixed":
+            # 트레이스가 없으면 mix_pct 가 None 이라 이 분기에 닿지 않습니다.
+            r = core.qc_one(synth_neg_read(core, "nolink"), cfg)
+            r = dict(r)
+            r["mix_pct"] = cfg["mix_pct"] + 1.0
+            got, why = core.negctrl_verdict(r, cfg)
+        else:
+            r = core.qc_one(read, cfg)
+            got, why = core.negctrl_verdict(r, cfg)
+        report.ok("E", "%s %s" % (tag, label), got == want,
+                  "%s · %s" % (want, why[:34]),
+                  "기대 %s 실제 %s (%s)" % (want, got, why))
 
 
 # --- index.html 의 badge() 가 아래 표시값을 모두 처리하는가 --------------------
@@ -1679,6 +1780,7 @@ def main():
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
         guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
+        guard(report, "B", "대조군 verdict 처리", check_negctrl_vocab, report, core, html)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
         guard(report, "B", "FLAG_SEV 대 qc_one 의 실제 플래그",
@@ -1702,6 +1804,7 @@ def main():
 
         guard(report, "E", "check_landmark 단위", check_landmark_units, report, core)
         guard(report, "E", "스터퍼 길이 판정 단위", check_stuffer_units, report, core)
+        guard(report, "E", "대조군 판정 분기 단위", check_negctrl_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 

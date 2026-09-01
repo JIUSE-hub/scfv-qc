@@ -308,7 +308,7 @@ let faFile = null, faText = "";
 
 /* 모드 선택. 값은 core 의 MODE_OPTS 에서 오고, 화면 이름만 여기서 붙입니다.
    0 = 배치 지정, 1 = 라이브러리 전체 (core.MODE_OPTS 순서). */
-const MODE_NAMES = ["Assigned batch", "Library"];
+const MODE_NAMES = ["Assigned batch", "Library", "Negative control"];
 let modeIdx = 0;
 const isBatchMode = () => modeIdx === 0;
 
@@ -382,6 +382,8 @@ def js_docs():
         # core.MODE_OPTS 의 순서를 그대로 씁니다. [0] 배치 지정, [1] 라이브러리 전체.
         # 순서가 뒤집히면 verify.py 의 [B] 가 잡습니다.
         "modeOpts": list(core.MODE_OPTS),
+        "negLevel": dict(core.NEGCTRL_LEVEL),
+        "negVerdicts": list(core.NEGCTRL_VERDICTS),
         "version": {"core": core.CORE_VERSION, "notebook": core.NB_VERSION,
                     "writer": xlsx_writer.WRITER_VERSION, "python": sys.version.split()[0]},
     }, ensure_ascii=False)
@@ -949,6 +951,14 @@ function badge(v){
   if (s === "LONG_INSERT?" || s === "LOW_COVERAGE" || s === "PARENTAL?") return '<span class="badge b-check">' + esc(s) + "</span>";
   return '<span class="badge b-fail">' + esc(s) + "</span>";
 }
+/* 대조군 verdict 는 어휘가 달라 별도 배지를 씁니다. 등급은 core 의
+   NEGCTRL_LEVEL 에서 오고, 여기서는 등급 -> CSS 클래스만 정합니다. */
+const NEG_CLS = {fail: "b-fail", check: "b-check", none: "b-none"};
+function negBadge(v){
+  const s = String(v);
+  const cls = NEG_CLS[(DOC.negLevel || {})[s]] || "b-fail";
+  return '<span class="badge ' + cls + '">' + esc(s) + "</span>";
+}
 const BADGECOL = new Set(["최종판정","구조QC","QC1","QC2","QC3","QC4","내부종결"]);
 
 /* 예상(배치 지정) 과 판정을 한 칸에 보여준다. VH family 는 "VH6|VH2" 처럼
@@ -982,8 +992,58 @@ function tableFor(H, R, exp){
   return h + "</tbody>";
 }
 
+/* 대조군은 판정 어휘도 표 컬럼도 다릅니다. 컬럼명·판정코드·등급은 전부
+   core 의 negctrl_summary / NEGCTRL_LEVEL 에서 옵니다. */
+function renderNegctrl(N){
+  $("#resTbl").style.display = "none";
+  $("#resTbl").innerHTML = "";
+  const T = N.table;
+  let h = '<div class="grp-h"><span>유형별</span><span class="m">분석 ' +
+    N.n_total + " 클론</span></div><div style=\"margin-bottom:14px\">" +
+    N.counts.map(kv => negBadge(kv[0]) + " " + kv[1]).join(" &nbsp; ") + "</div>";
+  h += '<div class="tblwrap"><table><thead><tr>' +
+    T.headers.map(x => "<th>" + esc(x) + "</th>").join("") + "</tr></thead><tbody>";
+  T.rows.forEach(row => {
+    h += "<tr>" + row.map(v => {
+      const s = String(v == null ? "" : v);
+      if ((DOC.negLevel || {})[s]) return "<td>" + negBadge(s) + "</td>";
+      if (/^[0-9a-f]{32}$/.test(s)) return '<td class="mono">' + esc(s) + "</td>";
+      if (s === "") return '<td><span style="color:var(--muted)">-</span></td>';
+      return (typeof v === "number" ? '<td class="num">' : "<td>") + esc(s) + "</td>";
+    }).join("") + "</tr>";
+  });
+  $("#resGroups").innerHTML = h + "</tbody></table></div>";
+
+  $("#resHint").innerHTML = "대조군 " + N.n_total + " 클론 &nbsp;·&nbsp; param_hash <code>" +
+    esc(RUN.merged.config.param_hash) + "</code> &nbsp;·&nbsp; design_hash <code>" +
+    esc(RUN.merged.config.design_hash) + "</code>";
+  $("#resComp").innerHTML =
+    '<div class="grp-h"><span>인서트 지문</span><span class="m">' +
+    "다른 모드 결과의 같은 지문과 대조하세요. 자동 대조는 하지 않습니다.</span></div>" +
+    (N.fingerprints.length
+      ? '<dl class="kv">' + N.fingerprints.map(f =>
+          "<dt><code>" + esc(f) + "</code></dt><dd>" +
+          esc(N.clones.filter(c => c.insert_md5 === f).map(c => c.id).join(", ")) +
+          "</dd>").join("") + "</dl>"
+      : '<div class="status">인서트가 계산된 클론이 없습니다.</div>');
+  $("#secRes").classList.remove("hidden");
+}
+
 function renderResults(){
   const M = RUN.merged;
+  if (M.negctrl){
+    renderNegctrl(M.negctrl);
+    let det = "";
+    M.qc.filter(q => q.notes.length).forEach(q => {
+      det += '<details class="detail"><summary><b>' + esc(q.id) + "</b>" +
+        q.flags.map(f => '<span class="chip">' + esc(f) + "</span>").join("") +
+        "</summary><div class=\"body\"><ul>" +
+        q.notes.map(n => "<li>" + esc(n) + "</li>").join("") + "</ul></div></details>";
+    });
+    $("#resDetail").innerHTML = det ||
+      '<div class="status">추가로 확인할 항목이 없습니다.</div>';
+    return;
+  }
   const H = M.summary.headers, R = M.summary.rows;
   const iv = H.indexOf("최종판정");
   const nPass = (rows) => rows.filter(r => String(r[iv]).startsWith("PASS")).length;
