@@ -61,7 +61,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "1.7"
+VERIFY_VERSION = "1.8"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -77,14 +77,26 @@ KNOWN_DESIGN_DOC_GAP = set()
 MARKSEQ_REGEX = r"/\b[ACGT]{8,}\b/g"
 
 # --- [D] 기대값 --------------------------------------------------------------
+# [D] 회귀는 assigned 모드로 돌립니다. 배치 지정 대조까지 함께 지나가게 하려는
+# 것이며, 모드 값은 core 의 상수를 참조하지 않고 리터럴로 둡니다. 상수 값이 바뀌면
+# design_hash 가 달라져 [D] 가 잡아야 하기 때문입니다.
+REG_OVERRIDES = {"analysis_mode": "assigned",
+                 "batch_vh_family": "VH6", "batch_chain": "kappa"}
+REG_META = {"batch_label": "VH6-VK", "batch_date": "260819"}
+
+_STEM = "260819_VH6-VK_c%s_pAIM1-seq-For"      # 클론 ID = 확장자 뗀 파일명
+
 EXPECT = {
     "param_hash": "3473927a",
-    "design_hash": "be9b0573",
+    "design_hash": "8b1eab32",
     "clones": [
-        {"id": "c01", "verdict": "NO_LINKER",  "insert": 276, "mix": 2.5},
-        {"id": "c02", "verdict": "PASS",       "insert": 728, "d1": 366, "d2": 309, "mix": 2.1},
-        {"id": "c03", "verdict": "FRAMESHIFT", "insert": 735, "d1": 346, "d2": 336, "mix": 3.9},
-        {"id": "c04", "verdict": "PASS",       "insert": 746, "d1": 372, "d2": 321, "mix": 1.9},
+        {"id": _STEM % "01", "tag": "c01", "verdict": "NO_LINKER",  "insert": 276, "mix": 2.5},
+        {"id": _STEM % "02", "tag": "c02", "verdict": "PASS",       "insert": 728,
+         "d1": 366, "d2": 309, "mix": 2.1},
+        {"id": _STEM % "03", "tag": "c03", "verdict": "FRAMESHIFT", "insert": 735,
+         "d1": 346, "d2": 336, "mix": 3.9},
+        {"id": _STEM % "04", "tag": "c04", "verdict": "PASS",       "insert": 746,
+         "d1": 372, "d2": 321, "mix": 1.9},
     ],
     "cdr3_median": 10,
     "vl": [("IGKV4", 1), ("IGKV3", 1)],
@@ -715,8 +727,11 @@ def check_readconfig_covers_design(report, js, core):
     region = "\n".join(parts)
     literal = set(js_strings(region))
     dynamic = set()
-    if re.search(r"DOC\.design", region):
-        # DOC.design 을 순회해 폼과 cfg 를 만들면 DESIGN_DOC 키는 자동으로 덮인다
+    # cfg 를 채우는 것은 readConfig 이므로, 동적 생성 인정은 readConfig 가 직접
+    # DOC.design 을 순회할 때만 합니다. buildDesignForm 이 조회 테이블을 만드느라
+    # DOC.design 을 읽는 것만으로는 그 키가 cfg 에 실린다는 보장이 없습니다.
+    rc_body = js_function_body(js, "readConfig") or ""
+    if re.search(r"DOC\.design", rc_body):
         dynamic = set(k for k, _lab, _memo in core.DESIGN_DOC)
     covered = literal | dynamic
     gone = [k for k in keys if k not in covered]
@@ -788,6 +803,26 @@ def check_flag_sev_keys(report, core, core_tree):
               "%d 개 양방향 일치" % len(sev),
               "FLAG_SEV 에만 있음(유령): %s / qc_one 에만 있음(심각도 0): %s"
               % (", ".join(ghost) or "-", ", ".join(orphan) or "-"))
+
+
+def check_analysis_mode(report, core):
+    """analysis_mode 가 설계 키로 등록되고, MODE_OPTS 값이 그대로 통하는가."""
+    bad = []
+    default = core.DESIGN_DEFAULT_MAP.get("analysis_mode")
+    if "analysis_mode" not in core.DESIGN_KEYS:
+        bad.append("DESIGN_DEFAULTS 에 analysis_mode 없음")
+    if default not in core.MODE_OPTS:
+        bad.append("기본값 %r 이 MODE_OPTS 에 없음" % default)
+    for m in core.MODE_OPTS:
+        got = core.build_config({"analysis_mode": m}, [])["analysis_mode"]
+        if got != m:
+            bad.append("%r 를 넘겼는데 %r 로 저장됨" % (m, got))
+    if "analysis_mode" not in core.JUDGMENT_DESIGN_KEYS:
+        bad.append("JUDGMENT_DESIGN_KEYS 에 analysis_mode 없음")
+    report.ok("B", "analysis_mode 모드 값", not bad,
+              "기본값 %s · MODE_OPTS %s · design_hash 대상"
+              % (default, "/".join(core.MODE_OPTS)),
+              " / ".join(bad))
 
 
 def check_judgment_design_keys(report, core):
@@ -977,8 +1012,9 @@ def run_analysis(core):
         return None, "testdata/ 에 .ab1 또는 프라이머 FASTA 가 없습니다", SKIP
     meta = {"runtime": "verify.py " + VERIFY_VERSION,
             "timestamp": "0000-00-00 00:00:00", "primer_file": "scFv_primers.fa"}
+    meta.update(REG_META)
     try:
-        out = core.analyze(files, ptext, None, meta)
+        out = core.analyze(files, ptext, dict(REG_OVERRIDES), meta)
     except Exception as e:
         return None, "analyze 예외 %s: %s" % (type(e).__name__, e), FAIL
     if not out.get("ok"):
@@ -1004,15 +1040,15 @@ def check_regression(report, out, note, status):
     for e in EXPECT["clones"]:
         q = qc.get(e["id"])
         if q is None:
-            bad.append(e["id"] + " 없음")
+            bad.append("%s (%s) 없음" % (e["tag"], e["id"]))
             continue
         if q["verdict"] != e["verdict"]:
-            bad.append("%s verdict %s(기대 %s)" % (e["id"], q["verdict"], e["verdict"]))
+            bad.append("%s verdict %s(기대 %s)" % (e["tag"], q["verdict"], e["verdict"]))
         if q["insert_bp"] != e["insert"]:
-            bad.append("%s insert %s(기대 %d)" % (e["id"], q["insert_bp"], e["insert"]))
+            bad.append("%s insert %s(기대 %d)" % (e["tag"], q["insert_bp"], e["insert"]))
         for f in ("d1", "d2"):
             if f in e and q[f] != e[f]:
-                bad.append("%s %s %s(기대 %d)" % (e["id"], f, q[f], e[f]))
+                bad.append("%s %s %s(기대 %d)" % (e["tag"], f, q[f], e[f]))
     report.ok("D", "클론별 판정·길이", not bad,
               "%d 클론 · verdict / insert / d1 / d2 일치" % len(EXPECT["clones"]),
               " / ".join(bad))
@@ -1022,9 +1058,9 @@ def check_regression(report, out, note, status):
         q = qc.get(e["id"]) or {}
         got = None if q.get("mix_pct") is None else round(q["mix_pct"], 1)
         if got != e["mix"]:
-            badm.append("%s %s(기대 %s)" % (e["id"], got, e["mix"]))
+            badm.append("%s %s(기대 %s)" % (e["tag"], got, e["mix"]))
     report.ok("D", "클론별 혼합(%)", not badm,
-              " / ".join("%s %.1f" % (e["id"], e["mix"]) for e in EXPECT["clones"]),
+              " / ".join("%s %.1f" % (e["tag"], e["mix"]) for e in EXPECT["clones"]),
               " / ".join(badm))
 
     comp = out["composition"]
@@ -1344,6 +1380,7 @@ def main():
               check_readconfig_covers_design, report, js, core)
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
         guard(report, "B", "JUDGMENT_DESIGN_KEYS 가 DESIGN_DEFAULTS 에 존재",
               check_judgment_design_keys, report, core)
         guard(report, "B", "FLAG_SEV 대 qc_one 의 실제 플래그",

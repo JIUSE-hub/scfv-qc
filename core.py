@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "2.0"
+CORE_VERSION = "2.1"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -178,7 +178,14 @@ NOSEL = "(지정 안 함)"
 POOL_OPTS = ["분리", "pool"]
 CDNA_OPTS = ["oligo(dT)", "random hexamer", "혼합/불명"]
 
+# 분석 모드. 라이브러리를 만드는 중에는 VH·VL 을 아는 배치를 검증하고(assigned),
+# 완성 후에는 지정 없이 라이브러리 전체를 판정합니다(library).
+MODE_ASSIGNED = "assigned"
+MODE_LIBRARY = "library"
+MODE_OPTS = [MODE_ASSIGNED, MODE_LIBRARY]
+
 DESIGN_DEFAULTS = [
+    ("analysis_mode", MODE_ASSIGNED),
     ("f1_for_mode", "분리"),
     ("f1_rev_mode", "분리"),
     ("f2_for_mode", "분리"),
@@ -202,6 +209,8 @@ DESIGN_DEFAULT_MAP = dict(DESIGN_DEFAULTS)
 RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
 
 # 설계 항목 중 판정 분기를 실제로 만드는 것만 모읍니다. design_hash 의 대상입니다.
+#   analysis_mode
+#       assigned 일 때만 배치 지정 VH family / 경쇄와 대조한다. library 는 건너뛴다.
 #   batch_vh_family / batch_chain
 #       call_one 에서 WRONG_FAMILY / WRONG_CHAIN 플래그를 만들고, compose 의
 #       batch_vh_match / batch_chain_match 집계와 04_배치조성 "대조" 행까지 좌우한다.
@@ -215,10 +224,13 @@ RNA_KEYS = ("rna_bone_marrow", "rna_peripheral")
 #   읽히지만 판정 분기가 아님 :
 #       rna_bone_marrow, rna_peripheral — build_config 에서 rna_source
 #       표시 문자열을 조립할 때만 쓰인다.
-JUDGMENT_DESIGN_KEYS = ["batch_vh_family", "batch_chain",
+JUDGMENT_DESIGN_KEYS = ["analysis_mode", "batch_vh_family", "batch_chain",
                         "f1_for_mode", "f2_for_mode"]
 
 DESIGN_DOC = [
+    ("analysis_mode", "분석 모드",
+     "assigned = VH family 와 경쇄를 지정하고 대조한다. "
+     "library = 지정 없이 프라이머로만 판정한다"),
     ("f1_for_mode", "Fragment 1 For", "VH FR1 프라이머를 family 별로 나눠 PCR 했는지"),
     ("f1_rev_mode", "Fragment 1 Rev", "CDR3 경계 프라이머"),
     ("f2_for_mode", "Fragment 2 For", "CDR3 경계 프라이머"),
@@ -346,36 +358,25 @@ def parse_ab1(data):
 
 
 # =============================================================================
-#  5. 파일명 파싱  (노트북 Cell 1 과 동일)
+#  5. 파일명 -> 클론 ID
 # =============================================================================
-_FNAME_RE = re.compile(
-    r"^(?P<date>\d{6})_(?P<batch>.+?)_(?P<clone>[cC]\d+)_(?P<primer>.+)$")
-
-
 def _basename(path):
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
 
-def parse_read_name(filename):
+def read_id_from_name(filename):
+    """확장자만 뗀 파일명을 그대로 클론 ID 로 씁니다.
+
+    라이브러리 완성 후에는 수백 개를 시퀀싱하므로 파일명을 규칙에 맞춰
+    바꾸는 것이 불가능합니다. 그래서 파일명에서 정보를 추출하지 않습니다.
+      배치명 / 날짜 : 폼에서 받아 meta["batch_label"] / meta["batch_date"] 로 주입
+      판독 방향     : qc_one 의 orient() 가 서열의 앵커 개수로 판정
+    """
     stem = _basename(filename)
     if "." in stem:
         stem = stem.rsplit(".", 1)[0]
-    m = _FNAME_RE.match(stem)
-    if m:
-        info = m.groupdict()
-        info["parsed"] = True
-    else:
-        info = {"date": "", "batch": "", "clone": stem, "primer": "", "parsed": False}
-    probe = (info["primer"] or stem).lower()
-    if "rev" in probe:
-        info["direction"], info["dir_guessed"] = "R", False
-    elif "for" in probe:
-        info["direction"], info["dir_guessed"] = "F", False
-    else:
-        info["direction"], info["dir_guessed"] = "F", True
-    info["stem"] = stem
-    info["id"] = info["clone"] if info["parsed"] else stem
-    return info
+    return {"id": stem, "clone": stem, "stem": stem,
+            "date": "", "batch": "", "primer": ""}
 
 
 # =============================================================================
@@ -1128,13 +1129,15 @@ def call_one(r, primers, cfg):
                 notes.append("링커 뒤 서열이 VH FR1(%s) 과 일치 - VH-VH 조립 의심" % p["name"])
                 break
 
+    # library 모드는 배치에 무엇이 들어 있는지 모르는 상태로 판정하므로 대조하지 않습니다.
+    assigned = cfg["analysis_mode"] == MODE_ASSIGNED
     fam_matched = (vh["families"] if (vh is not None and vh["ok"]) else [])
-    if cfg["batch_vh_family"] != NOSEL and fam_matched:
+    if assigned and cfg["batch_vh_family"] != NOSEL and fam_matched:
         if cfg["batch_vh_family"] not in fam_matched:
             flags.append("WRONG_FAMILY")
             notes.append("배치 지정 %s 인데 %s 로 판정 - 튜브 간 교차오염 의심"
                          % (cfg["batch_vh_family"], "|".join(fam_matched)))
-    if cfg["batch_chain"] != NOSEL and chain:
+    if assigned and cfg["batch_chain"] != NOSEL and chain:
         if chain != cfg["batch_chain"]:
             flags.append("WRONG_CHAIN")
             notes.append("배치 지정 %s 인데 %s 로 판정" % (cfg["batch_chain"], chain))
@@ -1215,9 +1218,10 @@ def compose(primer_results, cfg):
         "batch_vh_match": None,
         "batch_chain_match": None,
     }
-    if cfg["batch_vh_family"] != NOSEL:
+    assigned = cfg["analysis_mode"] == MODE_ASSIGNED
+    if assigned and cfg["batch_vh_family"] != NOSEL:
         res["batch_vh_match"] = dict(vh_t).get(cfg["batch_vh_family"], 0)
-    if cfg["batch_chain"] != NOSEL:
+    if assigned and cfg["batch_chain"] != NOSEL:
         res["batch_chain_match"] = chain_c.get(cfg["batch_chain"], 0)
 
     zone = [p["id"] for p in primer_results
@@ -1445,14 +1449,18 @@ def _fam(call):
     return "|".join(call["families"]) if (call and call["ok"]) else "-"
 
 
-def build_summary(qc_results, calls, cfg):
+def build_summary(qc_results, calls, cfg, meta=None):
+    """batch / date 는 파일명이 아니라 폼에서 받은 meta 값을 씁니다."""
+    meta = meta or {}
+    batch = meta.get("batch_label", "")
+    date = meta.get("batch_date", "")
     rows = []
     by_id = {p["id"]: p for p in calls}
     for r in qc_results:
         p = by_id[r["id"]]
         ins = r["insert_bp"]
         rows.append([
-            r["id"], r["batch"], r["date"], r["primer"], r["direction"],
+            r["id"], batch, date, r["primer"], r["direction"],
             final_verdict(r, p), r["verdict"], ", ".join(p["flags"]) or "-",
             r["used_bp"], ins, (ins % 3) if ins is not None else None, r["d1"], r["d2"],
             r["qc"]["QC1"]["status"], r["qc"]["QC2"]["status"],
@@ -1474,7 +1482,7 @@ def build_sheets(qc_results, calls, cfg, comp, meta):
     # 01 판정요약
     sheets.append({
         "title": "01_판정요약", "headers": SUMMARY_HEADERS,
-        "rows": build_summary(qc_results, calls, cfg), "wrap": [7], "maxw": 60,
+        "rows": build_summary(qc_results, calls, cfg, meta), "wrap": [7], "maxw": 60,
         "note": "최종판정 = 구조QC 통과 AND 프라이머 판별 플래그 없음. "
                 "각 컬럼의 정의는 06_용어설명 시트 참조."})
 
@@ -1664,7 +1672,7 @@ def build_fasta(qc_results, calls, line_width=60):
 # =============================================================================
 def make_read(filename, data):
     """(파일명, bytes) 에서 분석용 read dict 를 만든다."""
-    info = parse_read_name(filename)
+    info = read_id_from_name(filename)
     ab = parse_ab1(data)
     info["filename"] = _basename(filename)
     info["raw_seq"] = ab["seq"]
@@ -1690,11 +1698,11 @@ def _load_reads(files):
 
 
 def _read_brief(r):
+    # direction / dir_guessed / parsed 는 파일명 파싱 폐기와 함께 사라졌습니다.
+    # 판독 방향은 qc_one 의 orient() 결과(analyze 의 qc 항목)에서 확인하세요.
     return {"id": r["id"], "filename": r["filename"], "clone": r["clone"],
             "batch": r["batch"], "date": r["date"], "primer": r["primer"],
-            "direction": r["direction"], "dir_guessed": r["dir_guessed"],
-            "parsed": r["parsed"], "raw_len": r["raw_len"],
-            "mean_q": round(r["mean_q"], 1),
+            "raw_len": r["raw_len"], "mean_q": round(r["mean_q"], 1),
             "has_qual": r["has_qual"], "has_trace": r["has_trace"]}
 
 
@@ -1702,7 +1710,7 @@ def scan_inputs(files, primer_text=""):
     """폼을 채우기 위한 입력 요약. 판정은 하지 않는다."""
     reads, errors = _load_reads(files)
     primers, trims, pwarns = parse_primer_fasta(primer_text) if primer_text else ([], {}, [])
-    batches = sorted(set(r["batch"] for r in reads if r["batch"]))
+    batches = []          # 파일명에서 배치를 뽑지 않습니다. 폼에서 입력받습니다.
     groups = {}
     for p in primers:
         key = p["group"] + " / " + p["chain"]
@@ -1741,7 +1749,9 @@ def analyze(files, primer_text="", overrides=None, meta=None):
         return {"ok": False, "errors": ["분석할 .ab1 이 없습니다."] + read_errors,
                 "read_errors": read_errors}
     primers, trims, pwarns = parse_primer_fasta(primer_text) if primer_text else ([], {}, [])
-    batches = sorted(set(r["batch"] for r in reads if r["batch"]))
+    # 배치명은 파일명이 아니라 폼에서 받습니다.
+    label = str(meta.get("batch_label", "") or "")
+    batches = [label] if label else []
     cfg = build_config(overrides, batches)
     if cfg["errors"]:
         return {"ok": False, "errors": cfg["errors"], "config": cfg}
