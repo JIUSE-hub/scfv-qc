@@ -179,3 +179,8 @@ core.py 는 Colab 노트북 scFv_sequencing_QC.ipynb v1.0 의 판정 로직을 �
     안 잡히는 것 : 레이아웃 · 색 · 여백 · 폰트
 
     UI 를 손볼 때는 브라우저로 직접 확인해야 한다.
+
+17. [기준점] param_hash 는 core 4.0 에서 3473927a -> 02d061d8 로 바뀌었다.
+    위치탐색 임계값 2 개(pos_max_mismatch · pos_miscall_q)가 CFG_DEFAULTS 에
+    추가되면서 THRESH_KEYS 가 16 -> 18 이 되었기 때문이다. 의도된 변경이다.
+    3473927a 는 core 1.0~3.3 의 기준점으로 남긴다.

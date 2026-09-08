@@ -67,7 +67,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.6"
+VERIFY_VERSION = "3.7"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -96,7 +96,7 @@ REG_META = {"batch_label": "VH6-VK", "batch_date": "260819"}
 _STEM = "260819_VH6-VK_c%s_pAIM1-seq-For"      # 클론 ID = 확장자 뗀 파일명
 
 EXPECT = {
-    "param_hash": "3473927a",
+    "param_hash": "02d061d8",
     "design_hash": "8b1eab32",
     "clones": [
         {"id": _STEM % "01", "tag": "c01", "verdict": "NO_LINKER",  "insert": 276, "mix": 2.5},
@@ -628,7 +628,13 @@ def find_function(tree, name):
 
 
 def check_summary_headers(report, js, core):
+    # 이 Set 들은 core 가 만든 표의 컬럼명을 참조합니다. 화면에 지금 그려지는
+    # 것은 01(과 대조군 표)뿐이지만, 컬럼명 자체는 어느 시트의 것이든 core 에
+    # 실재해야 오타·이름 변경을 잡을 수 있습니다. 그래서 전 시트의 헤더를
+    # 기준으로 삼습니다.
     headers = set(core.SUMMARY_HEADERS)
+    for sh in sheets_for_check(core, None):
+        headers |= set(sh.get("headers") or [])
     total, missing = 0, []
     for decl in ("const COMPACT", "const NUMCOL", "const MONOCOL", "const BADGECOL"):
         items = js_array_literal(js, decl)
@@ -1176,6 +1182,48 @@ def check_sheet05_design_rows(report, core):
               "설계 %d 행 + RNA 출처 합계 1 행 = DESIGN_DOC %d 키 · 세 값을 다르게 둔 설정"
               % (len(design) - 1, len(core.DESIGN_DOC)),
               " / ".join(bad))
+
+
+# 위치탐색 임계값은 판정에 직접 작용하므로 CFG_DEFAULTS·CFG_DOC·화면·param_hash
+# 어느 한 곳이라도 빠지면 조용히 고정값이 됩니다. 네 곳을 함께 봅니다.
+POS_THRESH_KEYS = ("pos_max_mismatch", "pos_miscall_q")
+
+
+def check_pos_thresholds(report, core, js):
+    bad = []
+    rc = js_function_body(js, "readConfig") or js
+    for k in POS_THRESH_KEYS:
+        if k not in core.CFG_DEFAULT_MAP:
+            bad.append("CFG_DEFAULTS 에 없음: " + k)
+        if k not in core.CFG_DOC:
+            bad.append("CFG_DOC 에 없음: " + k)
+        if k not in core.THRESH_KEYS:
+            bad.append("THRESH_KEYS(param_hash 대상) 에 없음: " + k)
+    # 화면은 DOC.thresh 를 순회해 만들므로 readConfig 가 그 순회를 하고 있는지 본다
+    if not re.search(r"DOC\.thresh", rc):
+        bad.append("readConfig 가 DOC.thresh 를 순회하지 않음")
+    # find_motif 가 두 값을 실제로 읽는가
+    src = read_text(os.path.join(ROOT, "core.py"))
+    fn = find_function(ast.parse(src), "find_motif")
+    if fn is None:
+        bad.append("core 에 find_motif 가 없음")
+    else:
+        body = ast.dump(fn)
+        for k in POS_THRESH_KEYS:
+            if repr(k)[1:-1] not in body:
+                bad.append("find_motif 가 %s 를 안 읽음" % k)
+        # 홀드아웃([H] H9)은 exact_first=False 로 ① 을 꺼야 성립합니다. 정상
+        # 코드에서는 두 경로가 같은 답을 내므로 스위치를 무력화해도 결과로는
+        # 구분되지 않습니다. 그래서 인자가 실제로 쓰이는지를 소스에서 봅니다.
+        args = [a.arg for a in fn.args.args] + [a.arg for a in fn.args.kwonlyargs]
+        if "exact_first" not in args:
+            bad.append("find_motif 에 exact_first 인자가 없음")
+        elif not any(isinstance(nd, ast.Name) and nd.id == "exact_first"
+                     for nd in ast.walk(fn)):
+            bad.append("find_motif 가 exact_first 를 쓰지 않음 (홀드아웃이 무력해짐)")
+    report.ok("B", "위치탐색 임계값 노출", not bad,
+              "%s 가 CFG_DEFAULTS·CFG_DOC·THRESH_KEYS 에 있고 find_motif 가 읽음"
+              % " · ".join(POS_THRESH_KEYS), " / ".join(bad))
 
 
 def check_design_doc(report, core):
@@ -2191,6 +2239,95 @@ def check_ambig_call_units(report, core):
               "후보 1 개(다중 표적)는 안 붙음", " / ".join(bad))
 
 
+def check_find_motif_units(report, core):
+    """find_motif 단위시험 P1~P9.
+
+    ④ 의 Q 판정 단위가 "구간 최저 Q" 가 아니라 "불일치한 그 염기의 Q" 라는 것이
+    이 기능의 정확도를 가르는 지점이라, P7 이 그 둘을 갈라놓습니다.
+    """
+    cfg = core.build_config(None, [])
+    tol, qcut = cfg["pos_max_mismatch"], cfg["pos_miscall_q"]
+    M = "ACGTACGT"                      # 8 nt 모티프
+    PAD = "TTTTTTTTTTTT"                # 모티프와 겹치지 않는 채움
+
+    def build(motif_variant, qmap, pre=PAD, post=PAD, hi=60, lo=5):
+        """앞뒤를 채운 서열과 Q 배열. qmap 은 모티프 안 인덱스 -> Q."""
+        seq = pre + motif_variant + post
+        q = [hi] * len(seq)
+        for k, v in qmap.items():
+            q[len(pre) + k] = v
+        return seq, q, len(pre)
+
+    def swap(motif, idx):
+        out = list(motif)
+        for i in idx:
+            out[i] = {"A": "C", "C": "A", "G": "T", "T": "G"}[out[i]]
+        return "".join(out)
+
+    bad = []
+
+    def want(tag, seq, q, motif, start, exp_pos, exp_mm):
+        pos, mm, qs = core.find_motif(seq, q, motif, start, cfg)
+        if (pos, mm) != (exp_pos, exp_mm):
+            bad.append("%s: (%d, %d) 기대 (%d, %d)" % (tag, pos, mm, exp_pos, exp_mm))
+        return qs
+
+    # P1 완전 일치
+    seq, q, at = build(M, {})
+    want("P1", seq, q, M, 0, at, 0)
+    # P2 불일치 1 개 · 그 염기 Q 5
+    seq, q, at = build(swap(M, [3]), {3: 5})
+    want("P2", seq, q, M, 0, at, 1)
+    # P3 불일치 2 개 · 둘 다 Q 5
+    seq, q, at = build(swap(M, [2, 5]), {2: 5, 5: 5})
+    want("P3", seq, q, M, 0, at, 2)
+    # P4 불일치 3 개 · 전부 Q 5 -> 상한 초과라 못 찾음
+    seq, q, at = build(swap(M, [1, 3, 5]), {1: 5, 3: 5, 5: 5})
+    want("P4", seq, q, M, 0, -1, 0)
+    if tol != 2:
+        bad.append("P4 전제: pos_max_mismatch 가 %d (시험은 2 기준)" % tol)
+    # P5 불일치 1 개 · 그 염기 Q 50 -> 실제 서열 차이라 용서 안 됨
+    seq, q, at = build(swap(M, [3]), {3: 50})
+    want("P5", seq, q, M, 0, -1, 0)
+    # P6 불일치 2 개 중 하나만 Q 50 -> 하나라도 높으면 배제
+    seq, q, at = build(swap(M, [2, 5]), {2: 5, 5: 50})
+    want("P6", seq, q, M, 0, -1, 0)
+    # P7 ★ 구간 최저 Q 는 낮은데 불일치 염기의 Q 는 높다 -> 못 찾음.
+    #    "구간 최저 Q" 방식이면 이 자리를 통과시켜 버립니다.
+    seq, q, at = build(swap(M, [4]), {4: 50, 0: 2, 7: 3})
+    if min(q[at:at + len(M)]) >= qcut:
+        bad.append("P7 전제: 구간 최저 Q 가 %d 라 임계 %d 미만이 아님"
+                   % (min(q[at:at + len(M)]), qcut))
+    want("P7", seq, q, M, 0, -1, 0)
+    # P8 앞쪽 mm2 · 뒤쪽 mm0 -> 뒤쪽을 고른다 (불일치 개수 우선)
+    first = swap(M, [1, 6])
+    seq = PAD + first + PAD + M + PAD
+    q = [60] * len(seq)
+    q[len(PAD) + 1] = 5
+    q[len(PAD) + 6] = 5
+    exact_at = len(PAD) + len(first) + len(PAD)
+    want("P8", seq, q, M, 0, exact_at, 0)
+    # P8b 앞 mm2 · 뒤 mm1 — 둘 다 근사라야 ⑤ 의 정렬을 실제로 지나갑니다.
+    #     P8 은 뒤쪽이 완전 일치라 ① 에서 즉시 반환되어 정렬을 시험하지 못합니다.
+    second_v = swap(M, [4])
+    seq = PAD + first + PAD + second_v + PAD
+    q = [60] * len(seq)
+    for k in (1, 6):
+        q[len(PAD) + k] = 5
+    later = len(PAD) + len(first) + len(PAD)
+    q[later + 4] = 5
+    want("P8b", seq, q, M, 0, later, 1)
+    # P9 start 이전의 일치는 무시한다
+    seq = PAD + M + PAD + M + PAD
+    q = [60] * len(seq)
+    second = len(PAD) + len(M) + len(PAD)
+    want("P9", seq, q, M, len(PAD) + 1, second, 0)
+
+    report.ok("E", "find_motif 단위 P1~P9", not bad,
+              "완전일치 우선 · mm<=%d · 불일치 염기 Q<%d · 최소 불일치 우선 · "
+              "start 준수" % (tol, qcut), " / ".join(bad))
+
+
 def check_rna_source_units(report, core):
     """fragment 별 RNA 출처를 한 문자열로 합치는 규칙.
 
@@ -2340,7 +2477,7 @@ F_NAMES = ["F1 배치 2 개 병합", "F2 배치 label 구분", "F3 배치 지정
            "F7 배치 지정 수집"]
 
 GLUE_EXPECT = {
-    "param_hash": "3473927a",
+    "param_hash": "02d061d8",
     "design_hash": "8b1eab32",          # VH6 x kappa
     "lib_design_hash": "68210578",      # library + 배치 지정 없음
     "merged_rows": 4,
@@ -2763,32 +2900,60 @@ def check_negctrl_regression(report, core):
 LIB_DIR = os.path.join(TESTDATA, "lib260901")
 H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
            "H4 오염 분자 추적", "H5 랜드마크 이상 품질", "H6 판별 성공·커버리지",
-           "H7 배치 지정 반영 커버리지"]
+           "H7 배치 지정 반영 커버리지", "H8 위치탐색 근사 매칭", "H9 위치탐색 홀드아웃"]
+
+# core 4.0 의 위치탐색 근사 매칭 실측. 전부 이 저장소의 49 클론에서 잰 값입니다.
+#
+# ★ 지시받은 예상치와 다른 항목이 있습니다. 값을 맞추려고 규칙을 바꾸지 않고
+#   실측을 그대로 고정했습니다. 어긋난 곳과 이유 :
+#     AscI 확보  예상 45 / 실측 43. start=0 으로 완전히 풀어도 44 가 상한입니다.
+#     링커 확보  예상 32 / 실측 30. 이슈 15 보정을 제거하면서 VH6-VK_1 ·
+#                VH6-VK_3 을 잃습니다. 두 클론의 링커 불일치 염기 Q 가 각각
+#                61 / (8,25) 라 규칙 ④ 가 "실제 서열 차이" 로 보고 거부합니다.
+#                그래서 이 둘은 d2 도 계산되지 않습니다(예상 324 · 340).
+#     NotI 확보  예상 46 / 실측 47. VH6-VK_9 가 mm2 Q[7,10] 로 복원됩니다.
+#     복원 클론  예상 13 / 실측 11. 지시받은 10 개 이름은 전부 포함되고
+#                VH2-VK_1 이 하나 더 나옵니다.
+POS_EXPECT = {
+    "counts": {"ascI": 43, "link": 30, "notI": 47, "insert": 42, "in_range": 23},
+    "exact_ascI": 32,
+    # 클론 -> (불일치 개수, d2). d2 None 은 링커가 없어 계산되지 않는 경우입니다.
+    "ascI_recovered": {
+        "VH1-VK_10": (2, 325), "VH2-VK_1": (1, None), "VH2-VK_7": (1, 342),
+        "VH4-VK_1": (2, 329), "VH5-VK_10": (2, 339), "VH5-VK_3": (2, 333),
+        "VH5-VK_9": (1, 323), "VH6-VK_1": (2, None), "VH6-VK_3": (2, None),
+        "VH6-VK_4": (2, 342), "VH6-VK_8": (2, 342),
+    },
+    "holdout": (32, 32),
+}
 
 LIB_EXPECT = {
     "n": 49,
     "final": {"PASS": 1, "FAIL": 48},
     # 구조QC 분포와 플래그 빈도는 실측해 채웁니다. 비어 있으면 H1 이 측정값을
     # 상세 칸에 찍고 실패합니다 ([G2] 의 md5 와 같은 방식).
-    # core 3.0 : 링커 위치 보정(이슈 15)으로 NO_LINKER 2 건이 NO_ASCI 로 옮겨가고
-    # NO_VL 2 건이 사라졌으며, AMBIG_CALL?(이슈 14) 6 건이 새로 붙습니다.
+    # core 4.0 : 위치탐색 근사 매칭으로 AscI 가 32 -> 43 건이 되어 인서트·프레임·
+    # d2·QC3·QC4 가 대거 계산되기 시작합니다. NO_ASCI 10 -> 1 로 줄고, 대신 그
+    # 클론들의 진짜 결함(FRAMESHIFT · INTERNAL_STOP · QC_DEL)이 드러납니다.
+    # 이슈 15 의 링커 보정을 제거해 링커는 32 -> 30 으로 줄었습니다.
     "qc_verdict": {
-        "NO_ASCI": 10, "NO_LINKER": 9, "LINKER_DEL": 8, "TOO_SHORT": 6,
-        "QC_DEL": 5, "FRAMESHIFT": 4, "LOW_COVERAGE": 3, "ABERRANT_D1": 1,
-        "MIXED": 1, "PASS": 1, "WARN": 1,
+        "NO_LINKER": 10, "QC_DEL": 9, "LINKER_DEL": 7, "TOO_SHORT": 6,
+        "FRAMESHIFT": 4, "INTERNAL_STOP": 3, "LOW_COVERAGE": 3, "QC_ABSENT": 2,
+        "ABERRANT_D1": 1, "MIXED": 1, "NO_ASCI": 1, "PASS": 1, "WARN": 1,
     },
     "flags": {
-        "FRAMESHIFT": 24, "NO_FRAG1": 20, "TOO_SHORT": 19, "INTERNAL_STOP": 18,
-        "NO_VL": 18, "LOW_COVERAGE": 17, "NO_LINKER": 17, "NO_ASCI": 10,
-        "ABERRANT_D1": 8, "LINKER_DEL": 8, "LONG_INSERT?": 7, "AMBIG_CALL?": 6,
-        "QC_DEL": 6, "QC_WARN": 5, "MIXED": 4, "NO_NOTI": 3, "ABERRANT_D2": 2,
+        "FRAMESHIFT": 28, "INTERNAL_STOP": 26, "NO_FRAG1": 20, "NO_VL": 20,
+        "NO_LINKER": 19, "TOO_SHORT": 19, "LOW_COVERAGE": 13, "QC_DEL": 10,
+        "QC_WARN": 9, "ABERRANT_D1": 8, "LINKER_DEL": 8, "AMBIG_CALL?": 6,
+        "LONG_INSERT?": 5, "MIXED": 4, "QC_ABSENT": 3, "ABERRANT_D2": 2,
+        "NO_NOTI": 2, "NO_ASCI": 1,
     },
-    "structure": {"NotI+AscI": 32, "NotI만": 14, "AscI만": 0, "둘 다 없음": 3},
+    "structure": {"NotI+AscI": 42, "NotI만": 5, "AscI만": 1, "둘 다 없음": 1},
     # 같은 49 클론을 대조군 규칙으로도 읽습니다. 위 위치 분포만 고정하면
     # negctrl_verdict 의 EMPTY_VECTOR 조건("NotI 또는 AscI 미검출")에서 어느 항이
     # 필요한지는 덮이지 않습니다. 실제 판정 분포까지 고정해야 항 단위가 걸립니다.
-    "neg_verdict": {"CARRYOVER": 14, "EMPTY_VECTOR": 13, "CONTAMINATED?": 7,
-                    "PARTIAL_INSERT": 6, "CONTAMINATED": 5, "MIXED": 4},
+    "neg_verdict": {"CARRYOVER": 15, "CONTAMINATED": 10, "CONTAMINATED?": 10,
+                    "PARTIAL_INSERT": 6, "EMPTY_VECTOR": 4, "MIXED": 4},
     # VH6-VK_1 은 동점 후보가 VH4|VH6 이고 배치 지정 VH6 가 그 안에 있습니다.
     # WRONG_FAMILY / AMBIG_FAMILY? 는 배치 지정 family 가 판정 집합에 없을 때만
     # 나오는 분기라 이 클론에는 붙지 않습니다. 남는 근거는 ambiguity 필드입니다.
@@ -2799,17 +2964,17 @@ LIB_EXPECT = {
     "carry": {"md5": "bdb1431f6378b361f1cc0f93cb172f38",
               "clones": ["VH1-VK_3", "VH2-VK_9", "VH4-VK_3"]},
     # 랜드마크 이상의 판독 품질 (표시 계층. 판정에는 반영되지 않음)
-    "lm_anomaly_clones": 25,
-    "lm_lowq_clones": 13,
-    # QC2 는 실측 17 건입니다(제시값 18). minq 중앙값 29 · 범위 5~51 은 일치하므로
-    # 개수만 어긋난 것으로 보고 실측값으로 고정합니다.
-    "lm_by_key": {"QC1": 0, "QC2": 17, "QC3": 1, "QC4": 9},
+    # core 4.0 : AscI 가 잡히면서 QC3·QC4 가 NA 를 벗어나 실제로 채점되므로
+    # 이상 건수가 늘어납니다(QC3 1 -> 9, QC4 9 -> 13).
+    "lm_anomaly_clones": 33,
+    "lm_lowq_clones": 21,
+    "lm_by_key": {"QC1": 1, "QC2": 17, "QC3": 9, "QC4": 13},
     # 설계 키를 늘리거나 줄여도 판정 임계값과 판정 분기가 그대로면 두 해시는
     # 움직이지 않아야 합니다. library 모드 · 배치 지정 없음 기준입니다.
-    "param_hash": "3473927a",
+    "param_hash": "02d061d8",
     "design_hash": "68210578",
     # 판별 성공 모수와 프라이머 커버리지 (집계·표시 계층)
-    "called_n": {"vh": 29, "jh": 30, "vl": 31, "vj": 17},
+    "called_n": {"vh": 29, "jh": 28, "vl": 29, "vj": 18},
     "vh_species": (5, 5, [("VH4|VH6", 4)]),   # 확정 · 가능 · 동점 항목
     # 260901 은 VH1·VH2·VH4·VH5·VH6 x kappa 다섯 배치였고 VH3 와 lambda 는 보내지
     # 않았습니다. 그 지정을 반영하면 진짜 dropout 후보는 둘뿐입니다.
@@ -2821,8 +2986,9 @@ LIB_EXPECT = {
     "coverage_assigned": {
         ("F1_For", "heavy"): (7, 6, ["For-1-1c"], 2, False),
         ("F2_Rev", "heavy"): (4, 4, [], 0, False),
-        ("F3_For", "kappa"): (20, 13, ["For3-k-3", "For3-k-4", "For3-k-9", "For3-k-15",
-                                       "For3-k-17", "For3-k-19", "For3-k-20"], 0, True),
+        ("F3_For", "kappa"): (20, 12, ["For3-k-3", "For3-k-4", "For3-k-9", "For3-k-15",
+                                       "For3-k-17", "For3-k-18", "For3-k-19",
+                                       "For3-k-20"], 0, True),
         ("F3_For", "lambda"): (0, 0, [], 25, False),
         ("F3_Rev", "kappa"): (4, 3, ["Rev3-k-4"], 0, False),
         ("F3_Rev", "lambda"): (0, 0, [], 9, False),
@@ -2831,7 +2997,7 @@ LIB_EXPECT = {
     "coverage": {
         ("F1_For", "heavy"): (9, 6, 3, False),
         ("F2_Rev", "heavy"): (4, 4, 0, False),
-        ("F3_For", "kappa"): (20, 13, 7, True),
+        ("F3_For", "kappa"): (20, 12, 8, True),
         ("F3_For", "lambda"): (25, 0, 25, True),
         ("F3_Rev", "kappa"): (4, 3, 1, False),
         ("F3_Rev", "lambda"): (9, 0, 9, True),
@@ -2891,6 +3057,88 @@ def check_lib_regression(report, core):
     _check_h3(report, core, out, files, meta)
     _check_h4(report, out, core)
     _check_h2(report, core, files, ptext, meta)
+    _check_h8(report, core, files)
+    _check_h9(report, core, files)
+
+
+def _lib_reads(core, files):
+    """[H] 의 위치탐색 검사는 트리밍된 서열과 Q 가 필요해 qc_one 을 직접 부릅니다."""
+    cfg = core.build_config({"analysis_mode": core.MODE_LIBRARY}, [])
+    out = []
+    for name, data in files:
+        out.append(core.qc_one(core.make_read(name, data), cfg))
+    return cfg, out
+
+
+def _check_h8(report, core, files):
+    """H-a · H-b · H-d · H-e — 근사 매칭으로 랜드마크가 얼마나 살아났는가."""
+    cfg, rs = _lib_reads(core, files)
+    short = lambda i: i.split("-pAIM1")[0]
+    got = {
+        "ascI": sum(1 for r in rs if r["pos_ascI"] >= 0),
+        "link": sum(1 for r in rs if r["pos_link"] >= 0),
+        "notI": sum(1 for r in rs if r["pos_notI"] >= 0),
+    }
+    ins = [r for r in rs if r["insert_bp"] is not None]
+    got["insert"] = len(ins)
+    got["in_range"] = sum(1 for r in ins
+                          if cfg["insert_min"] <= r["insert_bp"] <= cfg["insert_max"])
+    bad = []
+    for k, v in sorted(POS_EXPECT["counts"].items()):
+        if got[k] != v:
+            bad.append("%s %d (기대 %d)" % (k, got[k], v))
+    # 근사로 AscI 를 복원한 클론과 그 근거를 이름 단위로 고정합니다.
+    rec = dict((short(r["id"]), ((r["pos_approx"]["ascI"] or (0, []))[0], r["d2"]))
+               for r in rs if (r["pos_approx"].get("ascI") or (0, []))[0])
+    if rec != POS_EXPECT["ascI_recovered"]:
+        only = sorted(set(rec) | set(POS_EXPECT["ascI_recovered"]))
+        bad.append("AscI 복원 %s" % [(k, rec.get(k), POS_EXPECT["ascI_recovered"].get(k))
+                                    for k in only
+                                    if rec.get(k) != POS_EXPECT["ascI_recovered"].get(k)])
+    report.ok("H", H_NAMES[7], not bad,
+              "AscI %d(완전일치 %d) · 링커 %d · NotI %d · 인서트 %d · 범위내 %d · "
+              "AscI 근사 복원 %d 클론"
+              % (POS_EXPECT["counts"]["ascI"], POS_EXPECT["exact_ascI"],
+                 POS_EXPECT["counts"]["link"], POS_EXPECT["counts"]["notI"],
+                 POS_EXPECT["counts"]["insert"], POS_EXPECT["counts"]["in_range"],
+                 len(POS_EXPECT["ascI_recovered"])),
+              " / ".join(bad))
+
+
+def _check_h9(report, core, files):
+    """H-c 홀드아웃 — 정답을 아는 클론에서 근사 규칙만으로 같은 위치를 복원하는가.
+
+    이 기능의 정확도를 직접 재는 유일한 검사입니다. ④ 를 "구간 최저 Q" 로
+    되돌리면 여기서 무너집니다.
+    """
+    cfg, rs = _lib_reads(core, files)
+    A, L, N = core.CONST["AscI"], core.CONST["QC2"], core.CONST["NotI"]
+    ok, tot, wrong = 0, 0, []
+    for r in rs:
+        s, q = r["seq"], r["qual"]
+        pn = core.find_motif(s, q, N, 0, cfg)[0]
+        l0 = pn + len(N) if pn >= 0 else 0
+        pl = core.find_motif(s, q, L, l0, cfg)[0]
+        a0 = (pl + len(L)) if pl >= 0 else l0
+        exact = s.find(A, a0)
+        if exact < 0:
+            continue
+        tot += 1
+        # ★ 규칙을 여기서 다시 구현하면 아무것도 시험하지 않게 됩니다.
+        #   core.find_motif 를 그대로 부르고 ① 만 끕니다.
+        if core.find_motif(s, q, A, a0, cfg, exact_first=False)[0] == exact:
+            ok += 1
+        else:
+            wrong.append(r["id"].split("-pAIM1")[0])
+    bad = []
+    if (ok, tot) != POS_EXPECT["holdout"]:
+        bad.append("홀드아웃 %d/%d (기대 %d/%d) · 틀린 클론 %s"
+                   % (ok, tot, POS_EXPECT["holdout"][0], POS_EXPECT["holdout"][1],
+                      ", ".join(wrong) or "-"))
+    report.ok("H", H_NAMES[8], not bad,
+              "완전 일치로 AscI 를 찾은 %d 클론에서 근사 탐색만으로 %d 건 위치 복원"
+              % (POS_EXPECT["holdout"][1], POS_EXPECT["holdout"][0]),
+              " / ".join(bad))
 
 
 def _check_h1(report, out):
@@ -3171,6 +3419,8 @@ def main():
               check_readconfig_covers_design, report, js, core, glue or "")
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "위치탐색 임계값 노출",
+              check_pos_thresholds, report, core, js)
         guard(report, "B", "05_실행설정이 설계 키를 덮는가",
               check_sheet05_design_rows, report, core)
         guard(report, "B", "analysis_mode 모드 값", check_analysis_mode, report, core)
@@ -3222,6 +3472,8 @@ def main():
               report, core)
         guard(report, "E", "용어설명 예시 선택 단위", check_doc_example_units, report, core)
         guard(report, "E", "rna_source 조립 단위", check_rna_source_units, report, core)
+        guard(report, "E", "find_motif 단위 P1~P9",
+              check_find_motif_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 

@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "3.3"
+CORE_VERSION = "4.0"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -159,6 +159,8 @@ CFG_DEFAULTS = [
     ("repeat_min_len", 15),
     ("primer_max_mismatch", 2),
     ("primer_margin_min", 0),
+    ("pos_max_mismatch", 2),
+    ("pos_miscall_q", 20),
 ]
 THRESH_KEYS = [k for k, _v in CFG_DEFAULTS]
 CFG_DEFAULT_MAP = dict(CFG_DEFAULTS)
@@ -180,6 +182,11 @@ CFG_DOC = {
     "repeat_min_len": ("탠덤 반복 최소 길이", "V 구간에서 이 길이 이상 반복 시 표시 (nt)"),
     "primer_max_mismatch": ("프라이머 허용 미스매치", "판별 구간에서 이 개수까지 허용 (개)"),
     "primer_margin_min": ("프라이머 모호성 마진", "1위-2위 점수차가 이 값 이하면 모호성 집합으로 보고"),
+    # 두 값의 근거는 find_motif 의 docstring 에 실측과 함께 적어 두었습니다.
+    "pos_max_mismatch": ("위치탐색 허용 불일치",
+                         "랜드마크 위치를 찾을 때 허용하는 불일치 염기 수 (개)"),
+    "pos_miscall_q": ("위치탐색 오독 판정 Q",
+                      "불일치한 염기의 Q 가 이 값 미만일 때만 판독 오류로 보고 용서한다"),
 }
 
 NOSEL = "(지정 안 함)"
@@ -678,6 +685,63 @@ def dp_align(lm, win):
     return sub, gap, j
 
 
+def find_motif(seq, qual, motif, start, cfg, exact_first=True):
+    """랜드마크 위치를 찾는다. 완전 일치를 먼저, 없으면 근사 매칭.
+
+    반환: (pos, n_mismatch, [불일치 염기의 Q]) 또는 (-1, 0, [])
+
+    Sanger 판독은 뒤로 갈수록 무너집니다. NotI·AscI 는 8 nt 뿐이고 AscI 는
+    read 800~850 자리에 오므로, 한 글자만 잘못 읽혀도 완전 일치가 실패하고
+    인서트·프레임·d2·QC3·QC4·F3_Rev 판별이 연쇄로 무너집니다. 클론 결함이
+    아니라 도구가 못 본 것이므로 근사 탐색을 둡니다.
+
+    두 임계값의 근거 (실측)
+      pos_max_mismatch = 2
+        8 nt 모티프에서 mm<=2 는 우연 일치 0.42%(300nt 창에서 기대 1.3 회),
+        mm<=3 은 2.73%(8.2 회)로 뛴다. 실측에서도 2->3 으로 올리면 복원은
+        1 건 늘지만 후보가 2 개 이상인 클론이 1->8 로 늘어 모호해진다.
+        45 nt 링커에는 12 까지 허용해도 후보가 1 개뿐이라 2 는 보수적이지만
+        무해하다. 짧은 모티프에 맞춘 값이 긴 모티프에서 안전하다.
+      pos_miscall_q = 20
+        15 · 20 · 25 · 30 전 구간에서 홀드아웃 정확도가 동일(18/18)했다.
+        진짜 불일치는 Q 가 확실히 높고 오독은 확실히 낮아 그 사이 어디를
+        잘라도 결과가 같다. 중간값을 택했다.
+
+    ★ Q 를 보는 단위는 "8 염기 구간의 최저 Q" 가 아니라 "불일치한 그 염기
+      자체의 Q" 입니다. 구간 최저 Q 로 만들면 홀드아웃이 4/18 로 무너집니다 —
+      완전 일치 자리는 Q 가 높으므로 "구간 최저 Q < 임계" 조건이 진짜 정답을
+      배제하고 엉뚱한 저품질 자리를 고르기 때문입니다. 불일치 염기만 보면
+      mm=0 일 때 조건이 자동 통과하여 18/18 이 됩니다.
+
+    ★ 탐색 범위를 d1/d2 의 정상 범위로 제한하지 않습니다. d2 가 31 인 클론
+      (짧은 VL)의 AscI 를 못 보게 되어 판정이 순환합니다. 탐색은 자유롭게 하고
+      정상 범위 여부는 d1_min/d1_max · d2_min/d2_max 가 판정합니다.
+      탐색과 판정을 분리해 둡니다.
+    """
+    start = max(0, start)
+    if exact_first:
+        hit = seq.find(motif, start)
+        if hit >= 0:
+            return hit, 0, []
+    # exact_first=False 는 홀드아웃 검증 전용입니다. 정답(완전 일치)을 아는
+    # 클론에서 ① 만 빼면 근사 규칙이 스스로 그 자리를 복원하는지 직접 잽니다.
+    # 판정 경로는 언제나 기본값으로 부릅니다.
+    m, tol, qcut = len(motif), cfg["pos_max_mismatch"], cfg["pos_miscall_q"]
+    cand = []
+    for i in range(start, len(seq) - m + 1):
+        bad = [k for k in range(m) if seq[i + k] != motif[k]]
+        if len(bad) > tol:
+            continue
+        qs = [qual[i + k] if i + k < len(qual) else 0 for k in bad]
+        if any(x >= qcut for x in qs):
+            continue
+        cand.append((len(bad), i, qs))
+    if not cand:
+        return -1, 0, []
+    cand.sort(key=lambda c: (c[0], c[1]))
+    return cand[0][1], cand[0][0], cand[0][2]
+
+
 def check_landmark(lm, seq, qual, covered, cfg):
     """랜드마크 하나를 판정. covered=False 면 read 범위 밖이라 판단 불가(NA)."""
     res = {"sub": 0, "gap": 0, "pos": -1, "minq": None, "status": "NA", "level": "NA"}
@@ -781,12 +845,25 @@ def qc_one(read, cfg):
     q = qor[lo:hi] if qor else []
     r.update(direction=d, trim_lo=lo, trim_hi=hi, used_bp=len(s), seq=s, qual=q)
 
+    # 개수 세기는 완전 일치를 유지합니다. 근사로 세면 한 자리가 여러 후보로
+    # 잡혀 개수가 부풀고 CONCATEMER 오판이 납니다. 위치만 근사로 찾습니다.
     n_notI = s.count(CONST["NotI"])
     n_ascI = s.count(CONST["AscI"])
     n_link = s.count(CONST["QC2"])
-    pos_n = s.find(CONST["NotI"])
-    pos_a = s.find(CONST["AscI"])
-    pos_l = s.find(CONST["QC2"])
+    # 랜드마크는 순서가 정해져 있으므로 앞 랜드마크 뒤에서 찾습니다.
+    # 앞 것이 없으면 그 앞 것 뒤에서, 그것도 없으면 0 에서 시작합니다.
+    approx = {}
+    pos_n, mm_n, q_n = find_motif(s, q, CONST["NotI"], 0, cfg)
+    approx["notI"] = (mm_n, q_n)
+    l_start = (pos_n + len(CONST["NotI"])) if pos_n >= 0 else 0
+    pos_l, mm_l, q_l = find_motif(s, q, CONST["QC2"], l_start, cfg)
+    approx["link"] = (mm_l, q_l)
+    if pos_l >= 0:
+        a_start = pos_l + len(CONST["QC2"])
+    else:
+        a_start = l_start
+    pos_a, mm_a, q_a = find_motif(s, q, CONST["AscI"], a_start, cfg)
+    approx["ascI"] = (mm_a, q_a)
     r.update(n_notI=n_notI, n_ascI=n_ascI, n_link=n_link,
              pos_notI=pos_n, pos_ascI=pos_a, pos_link=pos_l)
 
@@ -798,7 +875,9 @@ def qc_one(read, cfg):
         notes.append("NotI %d / AscI %d / 링커 %d 회 검출 (각 1 회여야 함)"
                      % (n_notI, n_ascI, n_link))
 
-    r["stuffer"] = CONST["STUFFER"] in s
+    pos_st, mm_st, q_st = find_motif(s, q, CONST["STUFFER"], 0, cfg)
+    approx["stuffer"] = (mm_st, q_st)
+    r["stuffer"] = pos_st >= 0
     if r["stuffer"]:
         flags.append("PARENTAL")
         notes.append("모클론 스터퍼 서열 검출 (미절단/단일절단 벡터)")
@@ -815,19 +894,10 @@ def qc_one(read, cfg):
         qc[k] = check_landmark(CONST[k], s, q, cov[k], cfg)
     r["qc"] = qc
 
-    # 링커 위치 보정 : 완전 일치 탐색(s.find)이 놓쳤어도 랜드마크 검사가 허용
-    # 치환 안에서 찾았다면 그 위치를 씁니다. 상태가 OK 일 때만 씁니다 —
-    # GAP / ABSENT / S#G# 는 랜드마크가 깨진 것이라 위치를 신뢰할 수 없습니다.
-    #
-    # NotI 와 AscI 에는 같은 보정을 할 수 없습니다. QC1 은 pos_notI 가, QC3·QC4 는
-    # pos_ascI 가 있어야 covered 로 검사되므로(위 cov), 그 자리가 비면 랜드마크도
-    # NA 가 되어 되살릴 근거가 없습니다. 즉 이 어긋남은 QC2 에서만 생깁니다.
-    if pos_l < 0 and qc["QC2"]["status"] == "OK" and qc["QC2"]["pos"] >= 0:
-        pos_l = qc["QC2"]["pos"]
-        r["pos_link"] = pos_l
-        notes.append("링커를 완전 일치로는 못 찾았으나 랜드마크 검사가 치환 %d 개로 "
-                     "위치 %d 에서 찾음 - 그 위치로 d1/d2 를 계산합니다"
-                     % (qc["QC2"]["sub"], pos_l + 1))
+    # 이슈 15 의 링커 위치 보정(s.find 실패 시 check_landmark 위치 사용)은
+    # 여기 있었으나 제거했습니다. find_motif 가 세 랜드마크 전부에 대해 같은
+    # 일을 더 넓게 하므로 중복이고, 보정 경로가 둘이면 어느 쪽이 위치를 정했는지
+    # 추적하기 어려워집니다. 근사로 찾았다는 사실은 pos_approx 에 남습니다.
 
     for k in ("QC1", "QC2", "QC3", "QC4"):
         lv = qc[k]["level"]
@@ -904,7 +974,8 @@ def qc_one(read, cfg):
     r.update(insert_bp=insert, d1=d1, d2=d2)
 
     prot, stop_ok = "", None
-    ip = s.find(CONST["PELB_ATG"])
+    ip, mm_p, q_p = find_motif(s, q, CONST["PELB_ATG"], 0, cfg)
+    approx["pelB"] = (mm_p, q_p)
     if ip >= 0:
         orf = s[ip:ip + ((len(s) - ip) // 3) * 3]
         full = translate(orf)
@@ -920,6 +991,7 @@ def qc_one(read, cfg):
             flags.append("INTERNAL_STOP")
             notes.append("AscI 이전에 종결코돈 (번역 %d aa 에서 중단)" % len(prot))
     r.update(prot=prot, aa_len=len(prot), stop_ok=stop_ok, orf_start=ip)
+    r["pos_approx"] = approx
 
     rep = None
     for lab, a0, a1 in (("VH", pos_n, pos_l),
@@ -1787,6 +1859,12 @@ def glossary(primers=None, cfg=None):
         ["QC 랜드마크", "상태 표기 OK", "일치. 또는 허용 치환 이내."],
         ["QC 랜드마크", "상태 표기 S#G#", "치환 # 개, 갭 # 개. 허용치를 넘었으나 랜드마크로는 인식됨 (WARN)."],
         ["QC 랜드마크", "상태 표기 GAP#", "갭 # 개로 FAIL 임계 이상. 올리고 결실 의심."],
+        ["QC 랜드마크", "위치탐색 근사 매칭",
+         "랜드마크 위치를 완전 일치로 못 찾으면, 불일치가 pos_max_mismatch 이하이고"
+         "그 불일치 염기의 Q 가 pos_miscall_q 미만인 자리를 찾는다. 판독 오류로"
+         "위치를 놓치는 것을 막기 위한 것이며, 불일치 염기의 Q 가 높으면 그 차이는"
+         "실제 서열 차이이므로 용서하지 않는다. 근사로 찾았을 때는 02_구조QC상세의"
+         "위치탐색 열에 불일치 개수와 그 염기의 Q 가 기록되므로 근거를 확인할 수 있다."],
         ["QC 랜드마크", "상태 표기 ABSENT",
          "치환 + 갭이 허용 예산(허용치환 + 갭FAIL)을 넘어 랜드마크로 인식되지 않음."],
         ["QC 랜드마크", "상태 표기 NA",
@@ -2041,6 +2119,22 @@ def _fam(call):
     return "|".join(call["families"]) if (call and call["ok"]) else "-"
 
 
+# pos_approx 를 사람이 읽는 한 칸으로 줄입니다. 전부 완전 일치면 "-" 입니다.
+POS_APPROX_KEYS = ("pelB", "notI", "link", "ascI", "stuffer")
+POS_APPROX_LABEL = {"pelB": "pelB", "notI": "NotI", "link": "링커",
+                    "ascI": "AscI", "stuffer": "스터퍼"}
+
+
+def fmt_pos_approx(approx):
+    out = []
+    for k in POS_APPROX_KEYS:
+        mm, qs = (approx or {}).get(k, (0, []))
+        if mm:
+            out.append("%s 근사 mm%d Q[%s]"
+                       % (POS_APPROX_LABEL[k], mm, ",".join(str(x) for x in qs)))
+    return " · ".join(out) or "-"
+
+
 _LM_KEYS = ("QC1", "QC2", "QC3", "QC4")
 
 
@@ -2265,6 +2359,20 @@ def build_sheets(qc_results, calls, cfg, comp, meta, primers=None, coverage=None
         r4.append(["점검", "%s 이상" % k,
                    "%d 건 · 저품질 %d 건" % (len(hit), len(low)),
                    "최저 Q 중앙값 %s" % med])
+    apx = [(r["id"], r.get("pos_approx") or {}) for r in qc_results]
+    hit_by_lm = {}
+    for _cid, a in apx:
+        for k in POS_APPROX_KEYS:
+            if (a.get(k) or (0, []))[0]:
+                hit_by_lm[k] = hit_by_lm.get(k, 0) + 1
+    n_apx = sum(1 for _cid, a in apx
+                if any((a.get(k) or (0, []))[0] for k in POS_APPROX_KEYS))
+    r4.append(["점검", "위치탐색 근사 매칭", "%d / %d 건" % (n_apx, len(apx)),
+               ("랜드마크별 %s. " % (" · ".join(
+                   "%s %d" % (POS_APPROX_LABEL[k], hit_by_lm[k])
+                   for k in POS_APPROX_KEYS if k in hit_by_lm) or "없음")) +
+               "완전 일치로 못 찾아 근사로 위치를 정한 건수. 불일치 염기의 "
+               "Q 가 낮아 판독 오류로 판단한 경우다"])
     if comp["overlong_suspect"]:
         r4.append(["점검", "F1_For 불일치 앞쪽 편중",
                    ", ".join(comp["overlong_suspect"]),
@@ -2300,7 +2408,7 @@ def _sheet_struct_qc(qc_results, title):
     for k in ("QC1", "QC2", "QC3", "QC4"):
         h2 += [k + "상태", k + "치환", k + "갭", k + "최저Q"]
     h2 += ["번역길이(aa)", "내부종결", "스터퍼", "탠덤반복구간", "탠덤반복주기(nt)",
-           "탠덤반복단위", "혼합(%)", "검사위치수", "비고"]
+           "탠덤반복단위", "혼합(%)", "검사위치수", "위치탐색", "비고"]
     r2 = []
     for r in qc_results:
         rep = r["repeat"] or {}
@@ -2318,7 +2426,8 @@ def _sheet_struct_qc(qc_results, title):
         row += [r["aa_len"], _STOP_TXT[r["stop_ok"]], _yn(r["stuffer"]),
                 rep.get("region", "-"), rep.get("period"), rep.get("unit", "-"),
                 round(r["mix_pct"], 2) if r["mix_pct"] is not None else None,
-                r["mix_n"], " / ".join(r["notes"]) or "-"]
+                r["mix_n"], fmt_pos_approx(r.get("pos_approx")),
+                " / ".join(r["notes"]) or "-"]
         r2.append(row)
     return {"title": title, "headers": h2, "rows": r2,
             "wrap": [len(h2) - 1], "maxw": 60,
@@ -2684,6 +2793,7 @@ def analyze(files, primer_text="", overrides=None, meta=None):
                       )
         pub_qc[-1]["qc"] = r["qc"]
         pub_qc[-1]["repeat"] = r["repeat"]
+        pub_qc[-1]["pos_approx"] = r["pos_approx"]
     pub_calls = []
     for p in calls:
         d = {k: p[k] for k in ("id", "qc_verdict", "chain", "chain_tie",
