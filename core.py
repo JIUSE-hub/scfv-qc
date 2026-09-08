@@ -34,7 +34,7 @@ import json
 import re
 import struct
 
-CORE_VERSION = "4.0"
+CORE_VERSION = "4.1"
 NB_VERSION = "1.0"          # 기준 노트북 버전
 
 # =============================================================================
@@ -2692,6 +2692,29 @@ def make_read(filename, data):
     return info
 
 
+_NAT_RE = re.compile(r"(\d+)")
+
+
+def natural_key(name):
+    """클론 ID 를 자연 정렬용 키로 바꾼다.
+    숫자 구간은 숫자로, 나머지는 소문자 문자열로 비교한다.
+    예) VH_VK_2 < VH_VK_10 (문자열 정렬이면 반대)
+
+    (\d+) 로 split 하면 홀수 자리가 항상 숫자 덩어리입니다. 각 조각을
+    (타입표시, 수, 글자) 3-튜플로 감싸 int 와 str 이 직접 비교되는 일이
+    없게 합니다. 앞자리 0 은 int 로 바뀌며 사라지고(c01 == c1), 숫자가
+    하나도 없는 이름은 조각이 하나뿐이라 그대로 문자열 비교가 됩니다.
+    """
+    parts = _NAT_RE.split(str(name))
+    out = []
+    for i, p in enumerate(parts):
+        if i % 2:
+            out.append((1, int(p), ""))
+        else:
+            out.append((0, 0, p.casefold()))
+    return out
+
+
 def _load_reads(files):
     reads, errors = [], []
     for name, data in files:
@@ -2699,7 +2722,9 @@ def _load_reads(files):
             reads.append(make_read(name, data))
         except Exception as e:
             errors.append(_basename(name) + " : " + str(e))
-    reads.sort(key=lambda r: r["filename"])
+    # 클론 순서를 정하는 단 한 곳입니다. 01·02·03·07 시트와 csv·fasta,
+    # 화면 표가 모두 이 순서를 그대로 따릅니다.
+    reads.sort(key=lambda r: natural_key(r["id"]))
     return reads, errors
 
 

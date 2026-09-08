@@ -657,7 +657,7 @@ function buildDesignForm(){
     '<div class="note">결과 파일명과 05_실행설정 기록에 쓰입니다. ' +
     'VH family 와 경쇄는 위 입력 섹션의 배치 카드에서 지정합니다.</div><div class="grid">' +
     '<div class="fld"><label for="mt_batch_label">배치명</label>' +
-    '<input type="text" id="mt_batch_label" placeholder="예: 260819_VH6-VK">' +
+    '<input type="text" id="mt_batch_label" placeholder="예: VH6-VK">' +
     '<span class="desc">결과 파일명 접두어와 01_판정요약의 batch 열</span></div>' +
     '<div class="fld"><label for="mt_batch_date">날짜</label>' +
     '<input type="text" id="mt_batch_date" placeholder="YYMMDD 또는 자유 형식">' +
@@ -1118,8 +1118,9 @@ function renderResults(){
     $("#resTbl").style.display = "none";
     let h = "";
     RUN.batches.forEach((b, i) => {
-      const rows = b.result.summary.rows.slice()
-        .sort((x, y) => String(x[0]).localeCompare(String(y[0])));
+      // core 가 이미 클론 ID 자연 정렬로 내보냅니다. 여기서 다시 정렬하면
+      // 정렬 규칙이 두 곳에 생겨 어긋납니다.
+      const rows = b.result.summary.rows;
       h += '<div class="grp-h"><span>배치 ' + (i+1) + " · " +
         esc(b.vh) + " &times; " + esc(b.chain) + "</span>" +
         '<span class="m">' + rows.length + " 클론 · 통과 " + nPass(rows) +

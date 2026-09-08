@@ -67,7 +67,7 @@ import tempfile
 import traceback
 import unicodedata
 
-VERIFY_VERSION = "3.7"
+VERIFY_VERSION = "3.8"
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PY_FILES = ("core.py", "xlsx_writer.py", "verify.py")
@@ -1290,6 +1290,18 @@ def check_no_label_leak(report, html, core):
 OPTLIST_NAMES = ("RNA_SOURCE_OPTS", "CDNA_OPTS")
 
 
+def check_no_resort_on_screen(report, js):
+    """화면이 core 의 클론 순서를 다시 정렬하지 않는가.
+
+    정렬 규칙이 core 와 화면 두 곳에 생기면 어긋납니다. core 가 이미 자연
+    정렬로 내보내므로 화면은 받은 순서를 그대로 그려야 합니다.
+    """
+    hits = re.findall(r"summary\.rows[\s\S]{0,120}?\.sort\(", js)
+    report.ok("B", "화면이 클론 순서를 다시 정렬", not hits,
+              "summary.rows 에 걸린 .sort( 없음 - core 순서를 그대로 씀",
+              "index.html 이 summary.rows 를 다시 정렬함 (%d 곳)" % len(hits))
+
+
 def check_no_optlist_leak(report, html, core):
     """드롭다운 선택지는 core 에서 읽어야 한다. index.html 에 리터럴로 있으면 실패."""
     hits, n = [], 0
@@ -2239,6 +2251,49 @@ def check_ambig_call_units(report, core):
               "후보 1 개(다중 표적)는 안 붙음", " / ".join(bad))
 
 
+def check_natural_key_units(report, core):
+    """natural_key 단위시험 P-a ~ P-f."""
+    nk = getattr(core, "natural_key", None)
+    if nk is None:
+        report.add("E", "natural_key 단위 P-a~P-f", FAIL, "core 에 natural_key 가 없습니다")
+        return
+    bad = []
+
+    def order(tag, names, want):
+        try:
+            got = sorted(names, key=nk)
+        except Exception as e:
+            bad.append("%s: 예외 %s: %s" % (tag, type(e).__name__, e))
+            return
+        if got != want:
+            bad.append("%s: %s (기대 %s)" % (tag, got, want))
+
+    # P-a 기본
+    order("P-a", ["c1", "c10", "c2"], ["c1", "c2", "c10"])
+    # P-b 앞자리 0
+    order("P-b", ["c01", "c10", "c02"], ["c01", "c02", "c10"])
+    # P-c 실제 클론 이름 꼴
+    order("P-c", ["VH_VK_1", "VH_VK_10", "VH_VK_2"],
+          ["VH_VK_1", "VH_VK_2", "VH_VK_10"])
+    # P-d 숫자가 없는 이름이 섞여도 예외가 나지 않는가
+    order("P-d", ["c10", "vec", "c2", "blank"], ["blank", "c2", "c10", "vec"])
+    # P-e 숫자가 여러 번 나오는 이름
+    order("P-e", ["a1b10", "a1b2", "a10b1"], ["a1b2", "a1b10", "a10b1"])
+    # P-f 대소문자가 섞여도 안정적인가 (casefold 로 같은 자리로 모인다)
+    order("P-f", ["VH_vk_10", "vh_VK_2"], ["vh_VK_2", "VH_vk_10"])
+    if nk("VH_VK_2") != nk("vh_vk_2"):
+        bad.append("P-f: 대소문자만 다른 이름의 키가 다름")
+    # 앞자리 0 은 값으로는 같고, 문자열 정렬과는 결과가 달라야 한다
+    if nk("c01") != nk("c1"):
+        bad.append("앞자리 0 이 int 로 안 바뀜")
+    if sorted(["c1", "c10", "c2"], key=nk) == sorted(["c1", "c10", "c2"]):
+        bad.append("문자열 정렬과 결과가 같음 (자연 정렬이 아님)")
+
+    report.ok("E", "natural_key 단위 P-a~P-f", not bad,
+              "숫자는 int · 나머지는 casefold · 앞자리 0 무해 · 숫자 없는 이름 안전",
+              " / ".join(bad))
+
+
 def check_find_motif_units(report, core):
     """find_motif 단위시험 P1~P9.
 
@@ -2474,7 +2529,7 @@ def check_badge_states(report, js):
 # testdata 를 두 배치로 나눠 돌립니다. 기대값은 실측해 고정했습니다.
 F_NAMES = ["F1 배치 2 개 병합", "F2 배치 label 구분", "F3 배치 지정 불일치",
            "F4 param_hash 불일치 오류", "F5 library 경로", "F6 병합 시트 구조",
-           "F7 배치 지정 수집"]
+           "F7 배치 지정 수집", "F8 배치 경계 대 클론 정렬"]
 
 GLUE_EXPECT = {
     "param_hash": "02d061d8",
@@ -2604,6 +2659,7 @@ def check_glue(report, glue, core):
         _check_glue_library(report, ns, core, cfg, meta)
         _check_f6(report, merged_box)
         _check_f7(report, ns, core, dirs, cfg, meta)
+        _check_f8(report, ns, core, root, cfg, meta, box)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -2633,6 +2689,68 @@ def _check_f1(report, out):
               % (GLUE_EXPECT["param_hash"], GLUE_EXPECT["design_hash"],
                  GLUE_EXPECT["merged_rows"], GLUE_EXPECT["n_good"],
                  GLUE_EXPECT["cdr3_median"], GLUE_EXPECT["fasta_n"]),
+              " / ".join(bad))
+
+
+def _check_f8(report, ns, core, root, cfg, meta, box):
+    """배치 경계가 클론 정렬보다 앞서는가.
+
+    기본 분할(b1=c01,c02 / b2=c03,c04)은 배치를 가로질러 정렬해도 같은 순서가
+    나와 회귀를 잡지 못합니다. 그래서 여기서만 교차하는 분할(b1=c01,c03 /
+    b2=c02,c04)을 만들어, 병합 결과가 "배치별 순서를 이어 붙인 것" 인지 봅니다.
+    """
+    src = os.path.join(ROOT, TESTDATA)
+    names = sorted(n for n in os.listdir(src) if n.lower().endswith(".ab1"))[:4]
+    if len(names) < 4:
+        report.add("F", F_NAMES[7], SKIP, "testdata/ 에 .ab1 4 개가 필요합니다")
+        return
+    dirs = {}
+    for key, part in (("x1", [names[0], names[2]]), ("x2", [names[1], names[3]])):
+        d = os.path.join(root, key)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        for n in part:
+            shutil.copyfile(os.path.join(src, n), os.path.join(d, n))
+        dirs[key] = d
+    spec = [{"dir": dirs["x1"], "vh": "VH6", "chain": "kappa"},
+            {"dir": dirs["x2"], "vh": "VH6", "chain": "kappa"}]
+    out = _run_batches(ns, core, spec, cfg, meta)
+    if not out.get("ok"):
+        report.add("F", F_NAMES[7], FAIL,
+                   "배치 실행 실패: " + "; ".join(out.get("errors", [])))
+        return
+    merged = [r[0] for r in out["merged"]["summary"]["rows"]]
+    # 병합은 summary 와 시트를 따로 만듭니다. 한쪽만 보면 다른 쪽의 회귀를
+    # 놓치므로 01·02·03·07 시트의 클론 순서도 함께 봅니다.
+    sheet_ids = {}
+    for sh in (box.get("sheets") or []):
+        t = str(sh.get("title", ""))
+        if t[:2] in ("01", "02", "07"):
+            sheet_ids[t] = [r[0] for r in sh["rows"]]
+    per = []
+    for b in out["batches"]:
+        per.extend(r[0] for r in b["result"]["summary"]["rows"])
+    bad = []
+    if merged != per:
+        bad.append("병합 순서가 배치별 순서의 연결이 아님: %s vs %s" % (merged, per))
+    for t, ids in sorted(sheet_ids.items()):
+        if ids != per:
+            bad.append("%s 시트 순서가 배치별 연결이 아님: %s" % (t, ids))
+    if not sheet_ids:
+        bad.append("병합 시트를 못 받았습니다")
+    # 이 검사가 실제로 무언가를 가르는지 스스로 확인합니다. 교차 분할이라
+    # 전체 자연 정렬과 달라야 하고, 같다면 시험 자료가 잘못된 것입니다.
+    flat = sorted(merged, key=core.natural_key)
+    if per == flat:
+        bad.append("교차 분할인데 전체 정렬과 같음 - 시험 자료가 구분력을 잃음")
+    # 배치 안에서는 자연 정렬이어야 합니다.
+    for b in out["batches"]:
+        ids = [r[0] for r in b["result"]["summary"]["rows"]]
+        if ids != sorted(ids, key=core.natural_key):
+            bad.append("배치 안이 자연 정렬이 아님: %s" % ids)
+    report.ok("F", F_NAMES[7], not bad,
+              "교차 분할(c01+c03 / c02+c04)에서 배치 경계 유지 · 배치 안은 자연 정렬 · "
+              "전체 정렬(%s)과 다름" % ", ".join(x.split("_")[2] for x in flat),
               " / ".join(bad))
 
 
@@ -2900,7 +3018,8 @@ def check_negctrl_regression(report, core):
 LIB_DIR = os.path.join(TESTDATA, "lib260901")
 H_NAMES = ["H1 전체 통계", "H2 이슈 12 실측", "H3 구조 조합 커버리지",
            "H4 오염 분자 추적", "H5 랜드마크 이상 품질", "H6 판별 성공·커버리지",
-           "H7 배치 지정 반영 커버리지", "H8 위치탐색 근사 매칭", "H9 위치탐색 홀드아웃"]
+           "H7 배치 지정 반영 커버리지", "H8 위치탐색 근사 매칭", "H9 위치탐색 홀드아웃",
+           "H10 클론 자연 정렬"]
 
 # core 4.0 의 위치탐색 근사 매칭 실측. 전부 이 저장소의 49 클론에서 잰 값입니다.
 #
@@ -3059,6 +3178,7 @@ def check_lib_regression(report, core):
     _check_h2(report, core, files, ptext, meta)
     _check_h8(report, core, files)
     _check_h9(report, core, files)
+    _check_h10(report, core, out)
 
 
 def _lib_reads(core, files):
@@ -3138,6 +3258,39 @@ def _check_h9(report, core, files):
     report.ok("H", H_NAMES[8], not bad,
               "완전 일치로 AscI 를 찾은 %d 클론에서 근사 탐색만으로 %d 건 위치 복원"
               % (POS_EXPECT["holdout"][1], POS_EXPECT["holdout"][0]),
+              " / ".join(bad))
+
+
+def _check_h10(report, core, out):
+    """산출물의 클론 순서가 자연 정렬인가.
+
+    49 클론에는 VH1-VK_2 와 VH1-VK_10 처럼 문자열 정렬과 결과가 갈리는 쌍이
+    있어, 이 데이터로만 실제 회귀를 잡을 수 있습니다(c01~c04 는 앞자리 0 이라
+    두 정렬이 같습니다).
+    """
+    ids = [r[0] for r in out["summary"]["rows"]]
+    bad = []
+    if ids != sorted(ids, key=core.natural_key):
+        wrong = [x for a, x in zip(sorted(ids, key=core.natural_key), ids) if a != x]
+        bad.append("01 이 자연 정렬이 아님. 어긋난 첫 항목 %s" % wrong[:3])
+    # 이 검사가 무언가를 가르는지 스스로 확인합니다. 문자열 정렬과 결과가
+    # 같은 자료라면 아무것도 시험하지 못한 것입니다.
+    if ids == sorted(ids):
+        bad.append("문자열 정렬과 결과가 같음 - 시험 자료가 구분력을 잃음")
+    # 다른 시트도 같은 순서여야 합니다.
+    for sh in out["sheets"]:
+        t = str(sh.get("title", ""))
+        if t[:2] not in ("01", "02", "03", "07"):
+            continue
+        seen, got = set(), []
+        for r in sh["rows"]:
+            if r[0] not in seen:
+                seen.add(r[0])
+                got.append(r[0])
+        if got != ids:
+            bad.append("%s 순서가 01 과 다름" % t)
+    report.ok("H", H_NAMES[9], not bad,
+              "01·02·03·07 이 같은 자연 정렬 · VH1-VK_2 가 VH1-VK_10 보다 앞",
               " / ".join(bad))
 
 
@@ -3419,6 +3572,8 @@ def main():
               check_readconfig_covers_design, report, js, core, glue or "")
         guard(report, "B", "CFG_DEFAULTS 대 CFG_DOC 키", check_cfg_doc, report, core)
         guard(report, "B", "DESIGN_DEFAULTS 대 DESIGN_DOC 키", check_design_doc, report, core)
+        guard(report, "B", "화면이 클론 순서를 다시 정렬",
+              check_no_resort_on_screen, report, js)
         guard(report, "B", "위치탐색 임계값 노출",
               check_pos_thresholds, report, core, js)
         guard(report, "B", "05_실행설정이 설계 키를 덮는가",
@@ -3474,6 +3629,8 @@ def main():
         guard(report, "E", "rna_source 조립 단위", check_rna_source_units, report, core)
         guard(report, "E", "find_motif 단위 P1~P9",
               check_find_motif_units, report, core)
+        guard(report, "E", "natural_key 단위 P-a~P-f",
+              check_natural_key_units, report, core)
 
     guard(report, "E", BADGE_LABEL, check_badge_states, report, js)
 
